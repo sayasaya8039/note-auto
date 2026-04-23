@@ -1,0 +1,99 @@
+//! Phase 3 公開パイプライン
+//!
+//! writer の WrittenArticle を受けて:
+//! 1. note.com へ自動投稿 (Playwright サイドカー)
+//! 2. X へ告知投稿 (X API v2 + OAuth1.0a)
+//! 3. Slack へ実行結果通知 (Incoming Webhook)
+
+use anyhow::Result;
+use serde::Serialize;
+
+pub mod note;
+pub mod slack;
+pub mod x_post;
+
+use crate::config::Config;
+use crate::writer::WrittenArticle;
+
+/// 記事1件あたりの公開結果
+#[derive(Debug, Clone, Serialize)]
+pub struct PublishResult {
+    pub slug: String,
+    pub title: String,
+    pub note_url: Option<String>,
+    pub note_status: String,
+    pub x_tweet_url: Option<String>,
+    pub x_status: String,
+    pub errors: Vec<String>,
+}
+
+/// 全体の実行サマリ (Slack通知用)
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    pub date: String,
+    pub articles: Vec<PublishResult>,
+    pub total_chars: usize,
+    pub duration_secs: u64,
+}
+
+pub async fn publish_all(cfg: &Config, articles: &[WrittenArticle]) -> Result<Vec<PublishResult>> {
+    if articles.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut results = Vec::new();
+    for a in articles {
+        let r = publish_one(cfg, a).await;
+        results.push(r);
+    }
+    Ok(results)
+}
+
+async fn publish_one(cfg: &Config, article: &WrittenArticle) -> PublishResult {
+    let mut result = PublishResult {
+        slug: article.slug.clone(),
+        title: article.title.clone(),
+        note_url: None,
+        note_status: "skipped".into(),
+        x_tweet_url: None,
+        x_status: "skipped".into(),
+        errors: vec![],
+    };
+
+    // 1. note.com 投稿
+    match note::publish(cfg, article).await {
+        Ok(r) => {
+            result.note_url = r.url;
+            result.note_status = r.status;
+        }
+        Err(e) => {
+            result.note_status = "error".into();
+            result.errors.push(format!("note: {e}"));
+            tracing::error!(slug = %article.slug, error = %e, "note publish failed");
+        }
+    }
+
+    // 2. X 告知 (note URL が取れた場合のみ)
+    if cfg.publish.x_announce {
+        match x_post::announce(cfg, article, result.note_url.as_deref()).await {
+            Ok(Some(url)) => {
+                result.x_tweet_url = Some(url);
+                result.x_status = "posted".into();
+            }
+            Ok(None) => {
+                result.x_status = "skipped".into();
+            }
+            Err(e) => {
+                result.x_status = "error".into();
+                result.errors.push(format!("x: {e}"));
+                tracing::warn!(slug = %article.slug, error = %e, "x announce failed");
+            }
+        }
+    }
+
+    result
+}
+
+pub async fn notify_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
+    slack::post_summary(cfg, summary).await
+}

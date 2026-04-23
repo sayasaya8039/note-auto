@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::ai::{
@@ -14,7 +14,7 @@ use crate::ai::{
 use crate::config::Config;
 use crate::scoring::SelectedTrend;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrittenArticle {
     pub title: String,
     pub slug: String,

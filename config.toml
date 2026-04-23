@@ -41,3 +41,27 @@ target_chars = 3000
 max_tokens = 8000
 # dry_run = true なら API 呼び出しをスキップしスタブで代替 (開発用)
 dry_run = false
+
+[publish]
+# Playwright サイドカー (note.com 自動投稿)
+playwright_script = "scripts/note-publish.ts"
+playwright_runtime = "bun"  # bun / "npx tsx" / "node --loader tsx" など
+cookie_dir = ".cookies"
+# true で公開、false で下書き保存のみ
+note_publish = false
+# X 告知投稿を有効化
+x_announce = true
+# API キーは環境変数 or .env 推奨
+# x_api_key = "..."
+# x_api_secret = "..."
+# x_access_token = "..."
+# x_access_secret = "..."
+# slack_webhook_url = "https://hooks.slack.com/services/..."
+# dry_run = true なら外部呼び出しをスキップ
+dry_run = false
+
+[schedule]
+# 毎日 07:00 JST (6フィールド cron: sec min hour day month dow)
+cron = "0 0 7 * * *"
+timezone = "Asia/Tokyo"
+daily_top = 3

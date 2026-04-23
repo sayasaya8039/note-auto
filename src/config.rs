@@ -10,6 +10,10 @@ pub struct Config {
     pub scoring: ScoringConfig,
     #[serde(default)]
     pub writer: WriterConfig,
+    #[serde(default)]
+    pub publish: PublishConfig,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,9 +111,98 @@ impl Default for WriterConfig {
     }
 }
 
+/// Phase 3: 公開 + 告知
+#[derive(Debug, Clone, Deserialize)]
+pub struct PublishConfig {
+    /// note.com 投稿用 Playwright スクリプトパス
+    #[serde(default = "default_playwright_script")]
+    pub playwright_script: String,
+    /// Playwright 実行ランタイム (bun / npx tsx など)
+    #[serde(default = "default_playwright_runtime")]
+    pub playwright_runtime: String,
+    /// Cookie 永続化ディレクトリ
+    #[serde(default = "default_cookie_dir")]
+    pub cookie_dir: String,
+    /// note 自動投稿 (true=公開ボタン押下、false=下書き保存のみ)
+    #[serde(default)]
+    pub note_publish: bool,
+    /// X 告知投稿を有効化するか
+    #[serde(default = "default_bool_true")]
+    pub x_announce: bool,
+    /// X OAuth1.0a (env: X_API_KEY / X_API_SECRET / X_ACCESS_TOKEN / X_ACCESS_SECRET)
+    #[serde(default = "env_x_api_key")]
+    pub x_api_key: Option<String>,
+    #[serde(default = "env_x_api_secret")]
+    pub x_api_secret: Option<String>,
+    #[serde(default = "env_x_access_token")]
+    pub x_access_token: Option<String>,
+    #[serde(default = "env_x_access_secret")]
+    pub x_access_secret: Option<String>,
+    /// Slack Incoming Webhook URL (env: SLACK_WEBHOOK_URL)
+    #[serde(default = "env_slack_webhook")]
+    pub slack_webhook_url: Option<String>,
+    /// dry-run: 外部呼び出しをスキップ
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl Default for PublishConfig {
+    fn default() -> Self {
+        Self {
+            playwright_script: default_playwright_script(),
+            playwright_runtime: default_playwright_runtime(),
+            cookie_dir: default_cookie_dir(),
+            note_publish: false,
+            x_announce: true,
+            x_api_key: env_x_api_key(),
+            x_api_secret: env_x_api_secret(),
+            x_access_token: env_x_access_token(),
+            x_access_secret: env_x_access_secret(),
+            slack_webhook_url: env_slack_webhook(),
+            dry_run: false,
+        }
+    }
+}
+
+/// Phase 3: スケジューラ
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduleConfig {
+    /// cron 式 (6フィールド: sec min hour day month dow)
+    #[serde(default = "default_cron")]
+    pub cron: String,
+    /// タイムゾーン (IANA 形式)
+    #[serde(default = "default_tz")]
+    pub timezone: String,
+    /// 1発火で処理する記事数
+    #[serde(default = "default_daily_top")]
+    pub daily_top: usize,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            cron: default_cron(),
+            timezone: default_tz(),
+            daily_top: default_daily_top(),
+        }
+    }
+}
+
 fn env_xai_key() -> Option<String> { std::env::var("XAI_API_KEY").ok() }
 fn env_anthropic_key() -> Option<String> { std::env::var("ANTHROPIC_API_KEY").ok() }
 fn env_openai_key() -> Option<String> { std::env::var("OPENAI_API_KEY").ok() }
+fn env_x_api_key() -> Option<String> { std::env::var("X_API_KEY").ok() }
+fn env_x_api_secret() -> Option<String> { std::env::var("X_API_SECRET").ok() }
+fn env_x_access_token() -> Option<String> { std::env::var("X_ACCESS_TOKEN").ok() }
+fn env_x_access_secret() -> Option<String> { std::env::var("X_ACCESS_SECRET").ok() }
+fn env_slack_webhook() -> Option<String> { std::env::var("SLACK_WEBHOOK_URL").ok() }
+fn default_playwright_script() -> String { "scripts/note-publish.ts".into() }
+fn default_playwright_runtime() -> String { "bun".into() }
+fn default_cookie_dir() -> String { ".cookies".into() }
+fn default_bool_true() -> bool { true }
+fn default_cron() -> String { "0 0 7 * * *".into() } // 毎日 07:00
+fn default_tz() -> String { "Asia/Tokyo".into() }
+fn default_daily_top() -> usize { 3 }
 
 fn default_hours() -> u32 { 24 }
 fn default_per_source() -> usize { 20 }
@@ -154,6 +247,11 @@ impl Config {
         if cfg.trends.xai_api_key.is_none() { cfg.trends.xai_api_key = env_xai_key(); }
         if cfg.writer.anthropic_api_key.is_none() { cfg.writer.anthropic_api_key = env_anthropic_key(); }
         if cfg.writer.openai_api_key.is_none() { cfg.writer.openai_api_key = env_openai_key(); }
+        if cfg.publish.x_api_key.is_none() { cfg.publish.x_api_key = env_x_api_key(); }
+        if cfg.publish.x_api_secret.is_none() { cfg.publish.x_api_secret = env_x_api_secret(); }
+        if cfg.publish.x_access_token.is_none() { cfg.publish.x_access_token = env_x_access_token(); }
+        if cfg.publish.x_access_secret.is_none() { cfg.publish.x_access_secret = env_x_access_secret(); }
+        if cfg.publish.slack_webhook_url.is_none() { cfg.publish.slack_webhook_url = env_slack_webhook(); }
         Ok(cfg)
     }
 }

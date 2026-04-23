@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 mod ai;
 mod config;
+mod daemon;
 mod logging;
+mod publish;
 mod scoring;
 mod trends;
 mod writer;
@@ -30,16 +32,12 @@ enum Command {
     },
     /// trends.json を入力に AI 執筆 → <slug>.md + <slug>.png を保存
     Write {
-        /// 入力 trends.json (fetch-trends の出力)
         #[arg(long)]
         from: PathBuf,
-        /// 出力ディレクトリ (デフォルト: trends.json と同じ場所)
         #[arg(long)]
         out: Option<PathBuf>,
-        /// 処理する上位件数 (デフォルト: 全件)
         #[arg(long)]
         limit: Option<usize>,
-        /// ドライラン (AI 呼び出しせずスタブ生成)
         #[arg(long)]
         dry_run: bool,
     },
@@ -49,6 +47,30 @@ enum Command {
         out: Option<PathBuf>,
         #[arg(long, default_value_t = 3)]
         top: usize,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// articles.json の記事を note 投稿 + X 告知 + Slack 通知
+    Publish {
+        /// articles.json (writer の出力 manifest)
+        #[arg(long)]
+        from: PathBuf,
+        /// 外部呼び出しをスキップ (配線検証)
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Slack Webhook に任意メッセージを送信 (配線確認用)
+    Notify {
+        /// 本文
+        #[arg(long, default_value = "note-auto 配線確認 📡")]
+        message: String,
+    },
+    /// 常駐モード — cron (default 07:00 JST) で fetch→write→publish→notify を発火
+    Daemon,
+    /// fetch→write→publish→notify を即座に1回だけ実行 (cron 待たずに)
+    Once {
+        #[arg(long)]
+        top: Option<usize>,
         #[arg(long)]
         dry_run: bool,
     },
@@ -104,6 +126,59 @@ async fn main() -> Result<()> {
             for a in &written {
                 println!("  - {} ({}文字) → {}", a.title, a.char_count, a.md_path.display());
             }
+        }
+        Command::Publish { from, dry_run } => {
+            if dry_run { cfg.publish.dry_run = true; }
+            let txt = std::fs::read_to_string(&from)
+                .with_context(|| format!("read {}", from.display()))?;
+            let articles: Vec<writer::WrittenArticle> = serde_json::from_str(&txt)
+                .with_context(|| "parse articles.json")?;
+            let start = std::time::Instant::now();
+            let results = publish::publish_all(&cfg, &articles).await?;
+            let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
+            let summary = publish::RunSummary {
+                date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+                articles: results,
+                total_chars,
+                duration_secs: start.elapsed().as_secs(),
+            };
+            publish::notify_summary(&cfg, &summary).await.ok();
+            println!("✓ publish完了: note={}/X={}/Slack=送信",
+                summary.articles.iter().filter(|a| a.note_status == "published" || a.note_status == "draft").count(),
+                summary.articles.iter().filter(|a| a.x_status == "posted").count(),
+            );
+        }
+        Command::Notify { message } => {
+            let summary = publish::RunSummary {
+                date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+                articles: vec![publish::PublishResult {
+                    slug: "test".into(),
+                    title: message.clone(),
+                    note_url: None,
+                    note_status: "skipped".into(),
+                    x_tweet_url: None,
+                    x_status: "skipped".into(),
+                    errors: vec![],
+                }],
+                total_chars: 0,
+                duration_secs: 0,
+            };
+            publish::notify_summary(&cfg, &summary).await?;
+            println!("✓ Slack Webhook に送信");
+        }
+        Command::Daemon => {
+            daemon::run_daemon(cfg).await?;
+        }
+        Command::Once { top, dry_run } => {
+            if dry_run {
+                cfg.writer.dry_run = true;
+                cfg.publish.dry_run = true;
+            }
+            if let Some(n) = top { cfg.schedule.daily_top = n; }
+            let summary = daemon::execute_cycle(&cfg).await?;
+            publish::notify_summary(&cfg, &summary).await.ok();
+            println!("✓ once完了 ({}記事 / {}s / {}文字)",
+                summary.articles.len(), summary.duration_secs, summary.total_chars);
         }
     }
 

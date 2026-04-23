@@ -32,6 +32,12 @@ dotenvy = "0.15"
 base64 = "0.22"
 async-trait = "0.1"
 slug = "0.1"
+tokio-cron-scheduler = "0.13"
+chrono-tz = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
+rand = "0.8"
+urlencoding = "2"
 
 [profile.release]
 opt-level = 3
