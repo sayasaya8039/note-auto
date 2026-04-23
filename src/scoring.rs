@@ -2,7 +2,7 @@ use crate::trends::TrendItem;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// 正規化後の選定結果
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SelectedTrend {
     #[serde(flatten)]
     pub item: TrendItem,
