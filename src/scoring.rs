@@ -45,17 +45,53 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
 
     normalized.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(std::cmp::Ordering::Equal));
 
-    // 重複除去
+    // カテゴリ/ソース分散を強制:
+    //  1st pass: 各 source から高スコア順に 1 件ずつ ラウンドロビンで拾う
+    //  それでも top に満たない場合は通常のスコア順で補充
+    //  タイトル類似度は bigram 0.65 で重複除去
     let mut selected: Vec<SelectedTrend> = Vec::new();
-    for cand in normalized {
-        let dup = selected.iter().any(|s| title_similarity(&s.item.title, &cand.item.title) >= 0.65);
-        if !dup {
-            selected.push(cand);
-            if selected.len() >= top {
-                break;
+
+    // source 別にキューを作る (スコア降順)
+    let mut queues: std::collections::BTreeMap<String, std::collections::VecDeque<SelectedTrend>> = Default::default();
+    for cand in normalized.iter().cloned() {
+        queues.entry(cand.item.source.clone()).or_default().push_back(cand);
+    }
+
+    // ラウンドロビン
+    let sources: Vec<String> = queues.keys().cloned().collect();
+    let max_rounds = top.max(1) + sources.len();
+    for _ in 0..max_rounds {
+        if selected.len() >= top { break; }
+        for src in &sources {
+            if selected.len() >= top { break; }
+            if let Some(q) = queues.get_mut(src) {
+                while let Some(cand) = q.pop_front() {
+                    let dup = selected.iter().any(|s|
+                        title_similarity(&s.item.title, &cand.item.title) >= 0.65
+                    );
+                    if !dup {
+                        selected.push(cand);
+                        break;
+                    }
+                }
             }
         }
     }
+
+    // 万一まだ足りない時はスコア順で補充
+    if selected.len() < top {
+        for cand in normalized {
+            if selected.iter().any(|s| s.item.title == cand.item.title) { continue; }
+            let dup = selected.iter().any(|s|
+                title_similarity(&s.item.title, &cand.item.title) >= 0.65
+            );
+            if !dup {
+                selected.push(cand);
+                if selected.len() >= top { break; }
+            }
+        }
+    }
+
     selected
 }
 

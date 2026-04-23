@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod ai;
 mod config;
 mod daemon;
+mod history;
 mod logging;
 mod publish;
 mod scoring;

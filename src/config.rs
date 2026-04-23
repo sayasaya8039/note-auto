@@ -221,17 +221,18 @@ fn default_daily_top() -> usize { 3 }
 fn default_hours() -> u32 { 24 }
 fn default_per_source() -> usize { 20 }
 fn default_sources() -> Vec<String> {
-    vec!["x".into(), "google".into(), "note".into(), "hn".into()]
+    vec!["x".into(), "google".into(), "gnews".into(), "note".into(), "hn".into()]
 }
 fn default_subreddits() -> Vec<String> {
     vec!["programming".into(), "technology".into(), "MachineLearning".into()]
 }
 fn default_source_weights() -> std::collections::HashMap<String, f64> {
     let mut m = std::collections::HashMap::new();
-    m.insert("x".into(), 1.2);
-    m.insert("google".into(), 1.0);
-    m.insert("note".into(), 1.1);
-    m.insert("hn".into(), 0.9);
+    m.insert("x".into(), 1.6);      // X を最優先 (多カテゴリ・話題性)
+    m.insert("gnews".into(), 1.4);  // Google News 日本版 (政治/経済/社会/エンタメ/科学/スポーツ)
+    m.insert("google".into(), 1.2); // 日本検索トレンド (国内ニュース寄り)
+    m.insert("note".into(), 0.7);   // note は多カテゴリ拡張済みだが優先度低め
+    m.insert("hn".into(), 0.4);     // 海外 tech 特化 (影響最小)
     m.insert("reddit".into(), 0.8);
     m
 }

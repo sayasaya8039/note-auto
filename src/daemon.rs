@@ -9,8 +9,9 @@ use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::config::Config;
+use crate::history::{History, HistoryEntry};
 use crate::publish::{publish_all, notify_summary, slack, PublishResult, RunSummary};
-use crate::scoring::select_top;
+use crate::scoring::{select_top, SelectedTrend};
 use crate::trends::fetch_all;
 use crate::writer;
 
@@ -66,10 +67,31 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
 
     // 1. fetch
     let items = fetch_all(cfg).await?;
-    let selected = select_top(items, cfg.schedule.daily_top);
+
+    // 履歴読み込み、重複を弾くため top を多めに選定
+    let history = History::load(None).unwrap_or_default();
+    let top = cfg.schedule.daily_top;
+    let pre = select_top(items, top * 4);
+    let mut selected: Vec<SelectedTrend> = Vec::new();
+    let mut skipped_dup = 0;
+    for cand in pre {
+        let dup = history.has_similar(&cand.item.title)
+            || cand.item.url.as_deref().map(|u| history.has_url(u)).unwrap_or(false);
+        if dup {
+            skipped_dup += 1;
+            tracing::debug!(title = %cand.item.title, "履歴と重複のためスキップ");
+            continue;
+        }
+        selected.push(cand);
+        if selected.len() >= top { break; }
+    }
+    tracing::info!(selected = selected.len(), skipped_dup, "trends selected (dedup against history)");
+    if selected.is_empty() {
+        return Err(anyhow::anyhow!("no fresh trends after history dedup (all candidates duplicate)"));
+    }
+
     let trends_path = out_dir.join("trends.json");
     std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
-    tracing::info!(count = selected.len(), "trends selected");
 
     // Stage 2: 選定通知 (タイトル一覧付き)
     let title_list: String = selected.iter().enumerate()
@@ -95,6 +117,27 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     // 3. publish
     let publish_results: Vec<PublishResult> = publish_all(cfg, &articles).await?;
     let duration_secs = start.elapsed().as_secs();
+
+    // 履歴に追記 (note に投稿成功したもののみ=重複再生成を完全に防ぐ)
+    // ただし draft でも追記 (下書きでも一度生成したら再生成したくない)
+    {
+        let mut hist = History::load(None).unwrap_or_default();
+        for (article, result) in articles.iter().zip(publish_results.iter()) {
+            if result.note_status == "published" || result.note_status == "draft" {
+                let entry = HistoryEntry {
+                    slug: article.slug.clone(),
+                    title: article.title.clone(),
+                    date: today.clone(),
+                    source_url: article.source_url.clone(),
+                    source: selected.iter().find(|s| s.item.title == article.title)
+                        .map(|s| s.item.source.clone()),
+                };
+                if let Err(e) = hist.append(entry) {
+                    tracing::warn!(error = %e, "history append failed");
+                }
+            }
+        }
+    }
 
     let summary = RunSummary {
         date: today,

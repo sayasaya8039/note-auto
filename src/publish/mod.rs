@@ -75,20 +75,28 @@ async fn publish_one(cfg: &Config, article: &WrittenArticle) -> PublishResult {
         }
     }
 
-    // 2. X 告知 (note URL が取れた場合のみ)
+    // 2. X 告知 — note が「published」(完全公開) のときのみ発火。
+    //    note_publish=false (安全モード、下書き保存のみ) のときは X も自動でスキップ。
     if cfg.publish.x_announce {
-        match x_post::announce(cfg, article, result.note_url.as_deref()).await {
-            Ok(Some(url)) => {
-                result.x_tweet_url = Some(url);
-                result.x_status = "posted".into();
-            }
-            Ok(None) => {
-                result.x_status = "skipped".into();
-            }
-            Err(e) => {
-                result.x_status = "error".into();
-                result.errors.push(format!("x: {e}"));
-                tracing::warn!(slug = %article.slug, error = %e, "x announce failed");
+        if result.note_status != "published" {
+            tracing::info!(
+                slug = %article.slug,
+                note_status = %result.note_status,
+                "note が published ではないため X 告知を自動スキップ (安全モード)"
+            );
+            result.x_status = "skipped".into();
+        } else {
+            match x_post::announce(cfg, article, result.note_url.as_deref()).await {
+                Ok(Some(url)) => {
+                    result.x_tweet_url = Some(url);
+                    result.x_status = "posted".into();
+                }
+                Ok(None) => result.x_status = "skipped".into(),
+                Err(e) => {
+                    result.x_status = "error".into();
+                    result.errors.push(format!("x: {e}"));
+                    tracing::warn!(slug = %article.slug, error = %e, "x announce failed");
+                }
             }
         }
     }

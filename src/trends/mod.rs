@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 
 pub mod google;
+pub mod google_news;
 pub mod hn;
 pub mod note_rss;
 pub mod reddit;
@@ -71,6 +72,11 @@ pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
     if enabled.contains("google") {
         futs.push(Box::pin(async {
             ("google", google::fetch(&client, cfg).await)
+        }));
+    }
+    if enabled.contains("gnews") {
+        futs.push(Box::pin(async {
+            ("gnews", google_news::fetch(&client, cfg).await)
         }));
     }
     if enabled.contains("note") {

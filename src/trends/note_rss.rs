@@ -7,11 +7,28 @@ use anyhow::Result;
 use crate::config::Config;
 use crate::trends::TrendItem;
 
+// 多様なカテゴリから拾うため hashtag を広く張る
+// tech/AI は HN + Grok でカバーできるので note 側は非 tech 寄せ
 const FEEDS: &[(&str, &str)] = &[
     ("note-trending", "https://note.com/trending/rss"),
-    ("note-ai", "https://note.com/hashtag/AI/rss"),
-    ("note-tech", "https://note.com/hashtag/テクノロジー/rss"),
-    ("note-biz", "https://note.com/hashtag/ビジネス/rss"),
+    // ライフ & 日常
+    ("note-lifestyle", "https://note.com/hashtag/ライフスタイル/rss"),
+    ("note-daily", "https://note.com/hashtag/日常/rss"),
+    ("note-essay", "https://note.com/hashtag/エッセイ/rss"),
+    // エンタメ
+    ("note-entame", "https://note.com/hashtag/エンタメ/rss"),
+    ("note-movie", "https://note.com/hashtag/映画/rss"),
+    ("note-music", "https://note.com/hashtag/音楽/rss"),
+    // グルメ・健康・子育て
+    ("note-food", "https://note.com/hashtag/グルメ/rss"),
+    ("note-health", "https://note.com/hashtag/健康/rss"),
+    ("note-parenting", "https://note.com/hashtag/子育て/rss"),
+    // 国内ニュース・社会
+    ("note-news", "https://note.com/hashtag/ニュース/rss"),
+    ("note-japan", "https://note.com/hashtag/日本/rss"),
+    // ガジェット・デザイン (軽く tech)
+    ("note-gadget", "https://note.com/hashtag/ガジェット/rss"),
+    ("note-design", "https://note.com/hashtag/デザイン/rss"),
 ];
 
 pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendItem>> {
