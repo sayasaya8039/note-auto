@@ -29,7 +29,11 @@ impl<'a> OpenAiImageClient<'a> {
     }
 
     pub async fn generate(&self, brief: &ArticleBrief) -> Result<ImageAsset> {
-        let prompt = build_prompt(brief);
+        self.generate_prompt(&build_prompt(brief)).await
+    }
+
+    pub async fn generate_prompt(&self, prompt: &str) -> Result<ImageAsset> {
+        let prompt = prompt.to_string();
         let body = json!({
             "model": self.model,
             "prompt": prompt,

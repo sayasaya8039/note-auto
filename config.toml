@@ -50,8 +50,8 @@ dry_run = false
 
 [publish]
 # Playwright サイドカー (note.com 自動投稿)
-playwright_script = "scripts/note-publish.ts"
-playwright_runtime = "bun"  # bun / "npx tsx" / "node --loader tsx" など
+playwright_script = "scripts/note-publish.mjs"
+playwright_runtime = "node"  # node (推奨) / bun / "npx tsx" など. bun は Windows で remote-debugging-pipe 問題あり
 cookie_dir = ".cookies"
 # true で公開、false で下書き保存のみ
 note_publish = false

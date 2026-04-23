@@ -18,8 +18,13 @@ pub struct ArticleBrief {
     pub slug: String,
     pub category: String,
     pub outline: Vec<String>,
+    /// SEO 1位を狙う 20個のハッシュタグ (# なし、文字列のみ)
     pub tags: Vec<String>,
     pub hook: String,
+    /// 4枚の画像生成プロンプト (英語、日本人・フォトリアル指定済み)
+    /// [0]=見出し (hero), [1..3]=本文挿入用
+    #[serde(default)]
+    pub image_prompts: Vec<String>,
 }
 
 /// Grok のリサーチ結果

@@ -65,6 +65,11 @@ enum Command {
         #[arg(long, default_value = "note-auto 配線確認 📡")]
         message: String,
     },
+    /// X に任意テキストを投稿 (OAuth 疎通確認用)
+    XTest {
+        #[arg(long, default_value = "note-auto OAuth test ✅")]
+        message: String,
+    },
     /// 常駐モード — cron (default 07:00 JST) で fetch→write→publish→notify を発火
     Daemon,
     /// fetch→write→publish→notify を即座に1回だけ実行 (cron 待たずに)
@@ -165,6 +170,10 @@ async fn main() -> Result<()> {
             };
             publish::notify_summary(&cfg, &summary).await?;
             println!("✓ Slack Webhook に送信");
+        }
+        Command::XTest { message } => {
+            let url = publish::x_post::post_text(&cfg, &message).await?;
+            println!("✓ X 投稿完了: {}", url);
         }
         Command::Daemon => {
             daemon::run_daemon(cfg).await?;

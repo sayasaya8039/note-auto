@@ -7,16 +7,20 @@
  * 出力: stdout の最終行に JSON
  *   { status: "published" | "draft" | "needs_login" | "error", url?, error? }
  *
- * Cookie: <cookie_dir>/note.json に Playwright storageState 形式で保存。
+ * Cookie: <cookie_dir>/note.json (storageState) または
+ *         <cookie_dir>/browser-profile/ (persistentContext)
  *
  * 初回セットアップ:
- *   bun scripts/note-publish.ts --login
- *     → ブラウザ起動、ユーザーが note.com にログイン、閉じると cookie 保存
+ *   bun scripts/note-publish.ts --login [cookie_dir]
  */
 
-import { chromium, type BrowserContext } from "playwright";
+console.error("[note-publish] script start");
+
+import { chromium, type BrowserContext, type Browser } from "playwright";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, resolve } from "node:path";
+
+console.error("[note-publish] playwright imported");
 
 type Input = {
   md_path: string;
@@ -47,37 +51,94 @@ function parseFrontMatter(md: string): { title: string; body: string } {
   return { title: titleMatch?.[1] ?? "", body };
 }
 
-async function loginFlow(cookieDir: string) {
-  mkdirSync(cookieDir, { recursive: true });
-  const browser = await chromium.launch({ headless: false });
-  const ctx = await browser.newContext();
-  const page = await ctx.newPage();
-  await page.goto("https://note.com/login");
-  console.error("note.com にログインしてください。完了したらブラウザを閉じてください...");
-  await page.waitForEvent("close", { timeout: 0 }).catch(() => {});
-  await ctx.storageState({ path: join(cookieDir, "note.json") });
-  await browser.close();
-  console.error("Cookie を保存しました。");
+/** launch 候補を順に試す。各 launch は TIMEOUT_MS 以内に成功しなければ次へ。 */
+async function launchContext(cookieDir: string, headless: boolean, persist: boolean):
+  Promise<{ ctx: BrowserContext; browser?: Browser; label: string }>
+{
+  const profileDir = resolve(cookieDir, "browser-profile");
+  const storageFile = join(cookieDir, "note.json");
+  const TIMEOUT_MS = 30_000;
+
+  const tryLaunch = async (label: string, channel?: string, noSandbox = false) => {
+    console.error(`[launch] trying ${label}...`);
+    const args = noSandbox ? ["--no-sandbox", "--disable-gpu-sandbox", "--disable-setuid-sandbox"] : undefined;
+    if (persist) {
+      // persistent context: 同じ profile dir を再利用 (Edge/Chrome が Windows で安定)
+      mkdirSync(profileDir, { recursive: true });
+      const ctx = await chromium.launchPersistentContext(profileDir, {
+        headless,
+        channel,
+        args,
+        timeout: TIMEOUT_MS,
+      });
+      console.error(`[launch] OK: ${label} (persistent)`);
+      return { ctx, label };
+    } else {
+      const opts: Parameters<typeof chromium.launch>[0] = { headless, timeout: TIMEOUT_MS };
+      if (channel) opts.channel = channel;
+      if (args) opts.args = args;
+      const browser = await chromium.launch(opts);
+      const contextOpts = existsSync(storageFile) ? { storageState: storageFile } : {};
+      const ctx = await browser.newContext(contextOpts);
+      console.error(`[launch] OK: ${label}`);
+      return { ctx, browser, label };
+    }
+  };
+
+  const candidates = [
+    { label: "system msedge",  channel: "msedge" as const },
+    { label: "system chrome",  channel: "chrome" as const },
+    { label: "managed chromium (no-sandbox)", channel: undefined, noSandbox: true },
+    { label: "managed chromium (default)",    channel: undefined, noSandbox: false },
+  ];
+  let lastErr: unknown;
+  for (const c of candidates) {
+    try {
+      return await tryLaunch(c.label, c.channel, (c as any).noSandbox ?? false);
+    } catch (e) {
+      const msg = (e as Error).message.split("\n")[0].slice(0, 200);
+      console.error(`[launch] ${c.label} FAILED: ${msg}`);
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("all launch candidates failed");
 }
 
-async function loadContext(cookieDir: string): Promise<BrowserContext | null> {
-  const cookiePath = join(cookieDir, "note.json");
-  if (!existsSync(cookiePath)) return null;
-  const browser = await chromium.launch({ headless: true });
-  return await browser.newContext({ storageState: cookiePath });
+async function loginFlow(cookieDir: string) {
+  mkdirSync(cookieDir, { recursive: true });
+  console.error(`[login] cookie_dir=${resolve(cookieDir)}`);
+  const { ctx, browser, label } = await launchContext(cookieDir, false, true);
+  const page = ctx.pages()[0] ?? await ctx.newPage();
+  await page.goto("https://note.com/login");
+  console.error(`[login] ${label} 開きました。note.com にログインして、完了したらブラウザを閉じてください...`);
+
+  // どちらのタイプでも close イベントを待つ
+  await new Promise<void>((r) => {
+    ctx.on("close", () => r());
+    if (browser) browser.on("disconnected", () => r());
+  });
+
+  // persistent context の profile 自体を再利用するので storageState は参考保存のみ
+  try {
+    await ctx.storageState({ path: join(cookieDir, "note.json") });
+  } catch { /* persistent 閉じた後は取れないので無視 */ }
+  console.error("[login] Cookie を保存しました: " + resolve(cookieDir));
 }
 
 async function run(input: Input): Promise<Output> {
-  const ctx = await loadContext(input.cookie_dir);
-  if (!ctx) {
-    return { status: "needs_login", error: `${input.cookie_dir}/note.json が存在しません。--login で初回ログインしてください` };
+  const cookiePath = join(input.cookie_dir, "note.json");
+  const profilePath = join(input.cookie_dir, "browser-profile");
+  if (!existsSync(cookiePath) && !existsSync(profilePath)) {
+    return { status: "needs_login", error: `${input.cookie_dir} が未初期化。--login で初回ログインしてください` };
   }
 
-  const page = await ctx.newPage();
+  const persist = existsSync(profilePath);
+  const { ctx, browser } = await launchContext(input.cookie_dir, true, persist);
+
   try {
+    const page = await ctx.newPage();
     await page.goto("https://note.com/notes/new", { waitUntil: "domcontentloaded" });
 
-    // ログイン状態確認
     if (page.url().includes("/login") || page.url().includes("/signin")) {
       return { status: "needs_login", error: "セッション切れ。--login で再ログインしてください" };
     }
@@ -86,24 +147,18 @@ async function run(input: Input): Promise<Output> {
     const { title, body } = parseFrontMatter(md);
     const finalTitle = title || input.title;
 
-    // タイトル入力 (note のエディタ: h1[placeholder*="タイトル"] 等)
     const titleSel = 'textarea[placeholder*="タイトル"], h1[contenteditable="true"], input[placeholder*="タイトル"]';
     await page.waitForSelector(titleSel, { timeout: 30000 });
     await page.fill(titleSel, finalTitle).catch(async () => {
-      // contenteditable の場合は type で
       await page.click(titleSel);
       await page.keyboard.type(finalTitle, { delay: 10 });
     });
 
-    // 本文入力 (contenteditable エディタ)
     const bodySel = 'div[contenteditable="true"]';
     const bodyLocator = page.locator(bodySel).last();
     await bodyLocator.click();
-    // 改行は Enter 押下で note がリッチエディタとして処理するので、
-    // まず単純化: 全行を1発で insert text
     await page.keyboard.insertText(body);
 
-    // アイキャッチ画像アップロード (input[type=file])
     if (input.image_path && existsSync(input.image_path)) {
       const fileInputs = await page.locator('input[type="file"]').all();
       if (fileInputs.length > 0) {
@@ -111,35 +166,30 @@ async function run(input: Input): Promise<Output> {
       }
     }
 
-    // 下書き保存 or 公開
     if (input.publish) {
-      // 「公開設定」→「公開する」フロー — ボタンテキストはUI更新で変わるため複数候補
       const publishBtn = page.getByRole("button", { name: /公開/ }).first();
       await publishBtn.click({ timeout: 10000 }).catch(() => {});
-      // 最終確認ダイアログの「投稿」「公開する」ボタン
       await page.getByRole("button", { name: /(投稿|公開する|確認して公開)/ }).first()
         .click({ timeout: 10000 }).catch(() => {});
-      // URL が /n/xxxx に遷移するのを待つ
       await page.waitForURL(/note\.com\/[^/]+\/n\//, { timeout: 60000 });
-      const url = page.url();
-      return { status: "published", url };
+      return { status: "published", url: page.url() };
     } else {
-      // 自動保存されるので明示的に下書き URL を取得
-      // URL が /notes/xxx/edit になっていれば下書き保存済み
       await page.waitForTimeout(3000);
-      const url = page.url();
-      return { status: "draft", url };
+      return { status: "draft", url: page.url() };
     }
   } catch (e: any) {
     return { status: "error", error: String(e?.message || e) };
   } finally {
-    await ctx.close();
+    if (browser) await browser.close();
+    else await ctx.close();
   }
 }
 
 async function main() {
-  if (process.argv.includes("--login")) {
-    const cookieDir = process.argv[process.argv.indexOf("--login") + 1] ?? ".cookies";
+  const args = process.argv.slice(2);
+  const loginIdx = args.indexOf("--login");
+  if (loginIdx >= 0) {
+    const cookieDir = args[loginIdx + 1] ?? ".cookies";
     await loginFlow(cookieDir);
     process.exit(0);
   }
@@ -156,5 +206,4 @@ async function main() {
   }
 }
 
-void dirname;
 void main();

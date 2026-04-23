@@ -2,3 +2,10 @@
 /drafts
 .env
 *.log
+/.cookies
+/node_modules
+pollo-*.json
+pollo-*.png
+x.txt
+slack.txt
+playwright.txt

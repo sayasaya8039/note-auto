@@ -73,6 +73,45 @@ pub async fn announce(
     Ok(Some(format!("https://x.com/i/web/status/{}", parsed.data.id)))
 }
 
+/// 任意テキストを tweet 投稿 (OAuth 疎通確認・CLI テスト用)
+pub async fn post_text(cfg: &Config, text: &str) -> Result<String> {
+    let (key, secret, token, token_secret) = match (
+        cfg.publish.x_api_key.as_deref(),
+        cfg.publish.x_api_secret.as_deref(),
+        cfg.publish.x_access_token.as_deref(),
+        cfg.publish.x_access_secret.as_deref(),
+    ) {
+        (Some(k), Some(s), Some(t), Some(ts)) => (k, s, t, ts),
+        _ => return Err(anyhow!("X OAuth 認証情報が .env に揃っていません")),
+    };
+
+    let body = json!({ "text": text });
+    let auth = build_oauth1_header("POST", ENDPOINT, key, secret, token, token_secret, &[]);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let resp = client
+        .post(ENDPOINT)
+        .header("Authorization", auth)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("X API {}: {}", status, txt));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Resp { data: Data }
+    #[derive(serde::Deserialize)]
+    struct Data { id: String }
+
+    let parsed: Resp = resp.json().await?;
+    Ok(format!("https://x.com/i/web/status/{}", parsed.data.id))
+}
+
 fn build_tweet_text(article: &WrittenArticle, note_url: Option<&str>) -> String {
     // X は 280 文字 (日本語は大半が2weight扱いなので実質100-140文字目安)
     let tags_line = article.tags.iter()

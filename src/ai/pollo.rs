@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
-use super::{ArticleBrief, ImageAsset};
+use super::ImageAsset;
 
 const BASE: &str = "https://pollo.ai/api/platform";
 
@@ -19,6 +19,7 @@ pub struct PolloClient<'a> {
     api_key: String,
     model_name: String,
     aspect_ratio: String,
+    quality: String,
 }
 
 impl<'a> PolloClient<'a> {
@@ -28,18 +29,24 @@ impl<'a> PolloClient<'a> {
             api_key: api_key.to_string(),
             model_name: model_name.to_string(),
             aspect_ratio: aspect_ratio.to_string(),
+            quality: "high".to_string(),
         }
     }
 
-    pub async fn generate(&self, brief: &ArticleBrief) -> Result<ImageAsset> {
-        let prompt = build_prompt(brief);
+    pub fn with_quality(mut self, q: &str) -> Self {
+        self.quality = q.to_string();
+        self
+    }
 
+    /// 任意プロンプトで画像を1枚生成
+    pub async fn generate_with_prompt(&self, prompt: &str) -> Result<ImageAsset> {
         // 1. submit
         let submit = json!({
             "generationInput": {
                 "modelName": self.model_name,
                 "prompt": prompt,
                 "aspectRatio": self.aspect_ratio,
+                "quality": self.quality,
                 "numOutputs": 1,
             }
         });
@@ -64,9 +71,9 @@ impl<'a> PolloClient<'a> {
 
         let submit_resp: SubmitResp = resp.json().await.context("parse submit response")?;
         let task_id = submit_resp.data.id;
-        tracing::info!(task_id, model = %self.model_name, "pollo task submitted");
+        tracing::info!(task_id, model = %self.model_name, quality = %self.quality, "pollo task submitted");
 
-        // 2. poll (generation は gpt-image-2 で 10-60秒程度)
+        // 2. poll
         let url = format!("{BASE}/generation/{task_id}");
         let png_url = self.poll_until_done(&url, 60, Duration::from_secs(5)).await?;
 
@@ -80,7 +87,7 @@ impl<'a> PolloClient<'a> {
             .await?
             .to_vec();
 
-        Ok(ImageAsset { prompt, png_bytes })
+        Ok(ImageAsset { prompt: prompt.to_string(), png_bytes })
     }
 
     async fn poll_until_done(&self, url: &str, max_iter: usize, interval: Duration) -> Result<String> {
@@ -110,8 +117,7 @@ impl<'a> PolloClient<'a> {
                 .send()
                 .await?;
             if !resp.status().is_success() {
-                let s = resp.status();
-                tracing::debug!(status = %s, iter = i, "poll non-200");
+                tracing::debug!(status = %resp.status(), iter = i, "poll non-200");
                 continue;
             }
             let poll: PollResp = resp.json().await.context("parse poll response")?;
@@ -131,24 +137,9 @@ impl<'a> PolloClient<'a> {
                 "waiting" | "processing" => {
                     tracing::debug!(iter = i, status = %poll.data.status, "polling");
                 }
-                other => {
-                    tracing::warn!(status = %other, "unknown pollo status");
-                }
+                other => tracing::warn!(status = %other, "unknown pollo status"),
             }
         }
         Err(anyhow!("pollo poll timeout after {} iterations", max_iter))
     }
-}
-
-fn build_prompt(brief: &ArticleBrief) -> String {
-    format!(
-        "Hero banner illustration for a Japanese note article titled \"{}\". \
-Category: {}. Keywords: {}. \
-Modern, clean editorial style. Strong composition, abstract metaphor in the center. \
-No text, no letters, no characters of any language. \
-Soft palette with one accent color, cinematic lighting, 16:9 aspect.",
-        brief.title,
-        brief.category,
-        brief.tags.join(", ")
-    )
 }
