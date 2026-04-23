@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::config::Config;
-use crate::publish::{publish_all, notify_summary, PublishResult, RunSummary};
+use crate::publish::{publish_all, notify_summary, slack, PublishResult, RunSummary};
 use crate::scoring::select_top;
 use crate::trends::fetch_all;
 use crate::writer;
@@ -55,8 +55,14 @@ pub async fn run_daemon(cfg: Config) -> Result<()> {
 pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     let start = std::time::Instant::now();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let hhmm = chrono::Local::now().format("%H:%M").to_string();
     let out_dir = PathBuf::from("drafts").join(&today);
     std::fs::create_dir_all(&out_dir)?;
+
+    // Stage 1: 起動通知
+    slack::post_progress(cfg, &format!(
+        "🚀 *note-auto 起動* ({today} {hhmm})\nトレンド収集開始 (4 ソース並列)"
+    )).await;
 
     // 1. fetch
     let items = fetch_all(cfg).await?;
@@ -65,13 +71,29 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
     tracing::info!(count = selected.len(), "trends selected");
 
+    // Stage 2: 選定通知 (タイトル一覧付き)
+    let title_list: String = selected.iter().enumerate()
+        .map(|(i, s)| format!("{}. {}", i + 1, s.item.title.chars().take(50).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    slack::post_progress(cfg, &format!(
+        "🔍 *{} 件選定完了* → 記事執筆開始 (推定 5-10 分/記事)\n{}",
+        selected.len(), title_list
+    )).await;
+
     // 2. write
     let articles = writer::run(cfg, &selected, &out_dir).await?;
+    let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
+
+    // Stage 3: 執筆完了通知
+    slack::post_progress(cfg, &format!(
+        "✍️ *{} 記事執筆完了* (合計 {}字 / 画像 {} 枚)\nnote 投稿開始 (1〜2 分/記事)",
+        articles.len(), total_chars,
+        articles.iter().map(|a| 1 + a.inline_image_paths.len()).sum::<usize>()
+    )).await;
 
     // 3. publish
     let publish_results: Vec<PublishResult> = publish_all(cfg, &articles).await?;
-
-    let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
     let duration_secs = start.elapsed().as_secs();
 
     let summary = RunSummary {

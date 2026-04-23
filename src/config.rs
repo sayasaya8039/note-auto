@@ -149,6 +149,9 @@ pub struct PublishConfig {
     /// Slack Incoming Webhook URL (env: SLACK_WEBHOOK_URL)
     #[serde(default = "env_slack_webhook")]
     pub slack_webhook_url: Option<String>,
+    /// 進捗通知 (各ステージで Slack に短いメッセージ送信) を有効化
+    #[serde(default = "default_bool_true")]
+    pub progress_notifications: bool,
     /// dry-run: 外部呼び出しをスキップ
     #[serde(default)]
     pub dry_run: bool,
@@ -167,6 +170,7 @@ impl Default for PublishConfig {
             x_access_token: env_x_access_token(),
             x_access_secret: env_x_access_secret(),
             slack_webhook_url: env_slack_webhook(),
+            progress_notifications: true,
             dry_run: false,
         }
     }

@@ -79,3 +79,37 @@ fn build_blocks(s: &RunSummary) -> Vec<serde_json::Value> {
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
+
+/// 進捗メッセージを Slack に送信 (ベストエフォート、失敗は warn のみ)
+pub async fn post_progress(cfg: &Config, text: &str) {
+    if cfg.publish.dry_run {
+        tracing::info!(msg = text, "[dry-run] Slack進捗スキップ");
+        return;
+    }
+    if !cfg.publish.progress_notifications {
+        return;
+    }
+    let Some(url) = cfg.publish.slack_webhook_url.as_deref() else {
+        return;
+    };
+    let body = json!({ "text": text });
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "slack progress: client build failed");
+            return;
+        }
+    };
+    match client.post(url).json(&body).send().await {
+        Ok(r) if !r.status().is_success() => {
+            let st = r.status();
+            let t = r.text().await.unwrap_or_default();
+            tracing::warn!(status = %st, body = %t.chars().take(120).collect::<String>(), "slack progress: non-200");
+        }
+        Err(e) => tracing::warn!(error = %e, "slack progress: request failed"),
+        _ => {}
+    }
+}

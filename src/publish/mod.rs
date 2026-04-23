@@ -12,6 +12,8 @@ pub mod note;
 pub mod slack;
 pub mod x_post;
 
+pub use slack::post_progress;
+
 use crate::config::Config;
 use crate::writer::WrittenArticle;
 
