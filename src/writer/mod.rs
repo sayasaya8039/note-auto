@@ -99,6 +99,15 @@ async fn write_one(
     // 3. 本文 (Opus) + 4画像並列生成
     let safe_slug = sanitize_slug(&brief.slug, index);
 
+    // Hero 画像は専用テンプレート (CityRiver.LLC 宣伝 + 固定キャラクター) で上書き
+    let mut brief_for_images = brief.clone();
+    let hero_prompt = build_hero_prompt(&brief, &research);
+    if brief_for_images.image_prompts.is_empty() {
+        brief_for_images.image_prompts.push(hero_prompt);
+    } else {
+        brief_for_images.image_prompts[0] = hero_prompt;
+    }
+
     let (draft_res, images_res) = tokio::join!(
         async {
             if dry_run {
@@ -110,7 +119,7 @@ async fn write_one(
                     .with_context(|| "Opus write failed")
             }
         },
-        generate_images(cfg, &http, &brief, dry_run),
+        generate_images(cfg, &http, &brief_for_images, dry_run),
     );
     let draft = draft_res?;
     let images = images_res; // Vec<Option<ImageAsset>> (常に長さ 4)
@@ -245,6 +254,38 @@ fn embed_images(
     }
 
     Ok((hero_path, inline_paths, body))
+}
+
+/// Hero (見出し) 画像専用プロンプト。
+///
+/// デザイン: CityRiver ブランドのプロダクトバナー構図
+///   - 左: 大きなキャッチ (= 記事タイトル) + 要約 + 特徴カード 3-4 枚 (= アウトラインの章)
+///   - 右: 固定キャラ (銀髪 / 青ヘッドバンド / 白レース襟 / 大きな瞳)
+///   - 下: CityRiver ロゴ + 「cityriver.sayasaya.workers.dev」+ QR 風アクセント
+///   - 1280×670 想定 / 16:9 / イラスト風 (フォトリアルではない)
+fn build_hero_prompt(brief: &ArticleBrief, research: &ResearchResult) -> String {
+    let summary_short: String = research.summary.chars().take(80).collect();
+    let feature_cards: Vec<String> = brief.outline.iter().take(3)
+        .map(|s| s.chars().take(10).collect::<String>())
+        .collect();
+    let cards_str = feature_cards.join(" / ");
+    let title_short: String = brief.title.chars().take(40).collect();
+
+    format!(
+        "Japanese SaaS landing page banner, 1280x670 16:9. NOT photorealistic. Clean flat design + anime mascot.\n\
+\n\
+LAYOUT:\n\
+- Top-left: 'CityRiver' navy sans-serif + wave icon + tiny JP tagline '言語の壁を、もう少しだけ薄く。'\n\
+- Main-left: BIG bold JP headline「{title_short}」, key words highlighted orange/blue. Small JP subtitle: '{summary_short}'\n\
+- Mid-left: 3 rounded feature cards (white/pale-blue, shadow, tiny icon + 8-14ch JP label) - {cards_str}\n\
+- Right side: semi-realistic anime girl, 3/4 pose. long silver-gray hair, dark teal headband with gold star, large light-blue eyes, white lace high-neck blouse, holding blue tablet, gentle smile, blurred warm background\n\
+- Bottom dark-navy bar: left 'by CityRiver' badge / right '今すぐチェック！ https://cityriver.sayasaya.workers.dev/' clean sans-serif + small QR square\n\
+\n\
+STYLE: trustworthy soft professional. Palette navy+white+one accent (orange or sakura). All JP text spelled correctly no gibberish. No generator watermark. Painterly anime, NOT 3D plastic.",
+        title_short = title_short,
+        summary_short = summary_short,
+        cards_str = cards_str,
+    )
 }
 
 /// image_prompts が不足している場合の補完 (品質ガード)

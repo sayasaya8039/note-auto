@@ -20,7 +20,10 @@ pub struct PublishOutput {
 #[derive(Debug, Serialize)]
 struct PublishInput<'a> {
     md_path: String,
+    /// hero (見出し) 画像パス
     image_path: Option<String>,
+    /// 本文挿入用の画像パス (最大3枚)
+    inline_image_paths: Vec<String>,
     title: &'a str,
     tags: &'a [String],
     publish: bool,
@@ -50,6 +53,9 @@ pub async fn publish(cfg: &Config, article: &WrittenArticle) -> Result<PublishOu
     let input = PublishInput {
         md_path: article.md_path.to_string_lossy().to_string(),
         image_path: article.image_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        inline_image_paths: article.inline_image_paths.iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
         title: &article.title,
         tags: &article.tags,
         publish: cfg.publish.note_publish,

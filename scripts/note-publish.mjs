@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
+import { marked } from "marked";
 
 console.error("[note-publish] playwright imported");
 
@@ -213,8 +214,10 @@ async function run(input) {
     }
 
     const md = readFileSync(input.md_path, "utf8");
-    const { title, body: mdBody } = parseFrontMatter(md);
+    const { title, body: mdBodyRaw } = parseFrontMatter(md);
     const finalTitle = title || input.title;
+    // 本文先頭の `# タイトル` は note のタイトル欄と重複するため除去
+    const mdBody = mdBodyRaw.replace(/^\s*#\s+.+?\n+/, "");
 
     // タイトル (textarea[placeholder="記事タイトル"])
     const titleSel = 'textarea[placeholder="記事タイトル"]';
@@ -222,26 +225,151 @@ async function run(input) {
     await page.fill(titleSel, finalTitle);
 
     // 本文 (ProseMirror エディタ)
+    // markdown を HTML に変換し、DataTransfer 経由で paste イベントを dispatch する
     const bodySel = 'div.ProseMirror[contenteditable="true"]';
+    await page.waitForSelector(bodySel, { timeout: 30000 });
     const bodyLocator = page.locator(bodySel).first();
     await bodyLocator.click();
-    // markdown をそのまま流し込み (ProseMirror は insertText で改行も保持)
-    await page.keyboard.insertText(mdBody);
-    await page.waitForTimeout(1500); // 自動保存の反映待ち
+    await page.waitForTimeout(500);
 
-    // アイキャッチ画像アップロード
-    if (input.image_path && existsSync(input.image_path)) {
+    // 画像リンクを処理:
+    //  - Hero (image_path と同じファイル名) は body から完全除去。別途 modal で upload。
+    //  - Inline は markdown → ユニークマーカー (`NOTEIMAGESLOTX`) に置換して paste 後差し替え。
+    // マーカーは ProseMirror の入力ルール (`__`, `**` 等) を避けてハイフン/大文字のみ。
+    let heroPath = null;
+    const inlineUploads = [];
+    let slotIdx = 0;
+    const heroFilename = input.image_path ? input.image_path.split(/[\\/]/).pop() : null;
+
+    const bodyForEditor = mdBody.replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, src) => {
+      const filename = src.split(/[\\/]/).pop();
+      if (heroFilename && filename === heroFilename) {
+        heroPath = input.image_path;
+        return ""; // body から完全除去
+      }
+      const inlineByName = (input.inline_image_paths || [])
+        .find((p) => p.split(/[\\/]/).pop() === filename);
+      if (!inlineByName || !existsSync(inlineByName)) return "";
+      const labels = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON", "ZETA"];
+      const marker = `NOTEIMAGESLOT${labels[slotIdx] ?? `X${slotIdx}`}`;
+      inlineUploads.push({ marker, path: inlineByName });
+      slotIdx++;
+      return `\n\n${marker}\n\n`;
+    });
+    // 連続する改行を 2 つに圧縮 (hero 除去で空行が増えるのを防止)
+    const bodyTrimmed = bodyForEditor.replace(/\n{3,}/g, "\n\n").replace(/^\s+/, "");
+    const html = marked.parse(bodyTrimmed, { breaks: true, gfm: true });
+
+    await page.evaluate(({ sel, html }) => {
+      const el = document.querySelectorAll(sel);
+      const editor = el[el.length - 1];
+      if (!editor) throw new Error("editor not found");
+      editor.focus();
+      const dt = new DataTransfer();
+      dt.setData("text/html", html);
+      dt.setData("text/plain", html.replace(/<[^>]+>/g, ""));
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      editor.dispatchEvent(ev);
+    }, { sel: bodySel, html });
+    await page.waitForTimeout(3000);
+
+    // Hero: 画像を追加 ボタン → filechooser
+    if (heroPath && existsSync(heroPath)) {
       try {
-        const imageBtn = page.getByRole("button", { name: "画像を追加" });
-        await imageBtn.click({ timeout: 5000 });
-        const fileChooserPromise = page.waitForEvent("filechooser", { timeout: 5000 });
-        const fc = await fileChooserPromise;
-        await fc.setFiles(input.image_path);
-        await page.waitForTimeout(3000);
+        console.error(`[publish] hero uploading: ${heroPath}`);
+        const heroBtn = page.getByRole("button", { name: "画像を追加" }).first();
+        await heroBtn.click({ timeout: 5000 });
+        await page.waitForTimeout(1800);
+        const fcPromise = page.waitForEvent("filechooser", { timeout: 8000 });
+        const uploadBtn = page.getByRole("button", { name: /画像をアップロード/ }).first();
+        await uploadBtn.click({ timeout: 5000 });
+        try {
+          const fc = await fcPromise;
+          await fc.setFiles(heroPath);
+          console.error("[publish] hero filechooser ok");
+        } catch {
+          console.error("[publish] hero filechooser timeout, trying input scan");
+          await setFileInAnyInput(page, heroPath);
+        }
+        await page.waitForTimeout(10000);
+        const confirmBtn = page.getByRole("button", { name: /(保存|OK|決定|確定|完了)/ }).first();
+        await confirmBtn.click({ timeout: 3000 }).catch(() => {});
+        await page.keyboard.press("Escape").catch(() => {});
+        await page.waitForTimeout(1500);
       } catch (e) {
-        console.error("[publish] image upload skipped:", String(e.message).slice(0, 100));
+        console.error(`[publish] hero upload failed:`, String(e.message).slice(0, 150));
       }
     }
+
+    // Inline マーカーを順次画像に差し替え
+    for (const { marker, path } of inlineUploads) {
+      try {
+        console.error(`[publish] inserting inline image at ${marker}: ${path}`);
+        // マーカーを含む段落の全体を選択して削除する (空 <p> を残さないため)
+        const found = await page.evaluate((marker) => {
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            if (node.textContent && node.textContent.includes(marker)) {
+              // マーカーを含む最も近い block element (<p>, <div>) を対象に
+              let block = node.parentElement;
+              while (block && !["P", "DIV", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4"].includes(block.tagName)) {
+                block = block.parentElement;
+              }
+              const target = block || node.parentElement;
+              // 段落全体を選択 (含まれる改行も取り除けるよう、前後の空段落もクリーンアップ用に記録)
+              const range = document.createRange();
+              range.selectNodeContents(target);
+              const sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              return true;
+            }
+          }
+          return false;
+        }, marker);
+        if (!found) {
+          console.error(`[publish] marker ${marker} not found, skipping`);
+          continue;
+        }
+        // 選択範囲(段落内容)を削除 → 空段落になる
+        await page.keyboard.press("Delete");
+        await page.waitForTimeout(150);
+        // Backspace で前段落に merge (空段落を消す)
+        await page.keyboard.press("Backspace");
+        await page.waitForTimeout(150);
+
+        // ProseMirror エディタに image File を paste event で投入
+        const b64 = readFileSync(path).toString("base64");
+        await page.evaluate(async ({ b64, sel }) => {
+          const all = document.querySelectorAll(sel);
+          const editor = all[all.length - 1];
+          if (!editor) throw new Error("editor not found for paste");
+          editor.focus();
+          const byteStr = atob(b64);
+          const bytes = new Uint8Array(byteStr.length);
+          for (let j = 0; j < byteStr.length; j++) bytes[j] = byteStr.charCodeAt(j);
+          const blob = new Blob([bytes], { type: "image/png" });
+          const file = new File([blob], "image.png", { type: "image/png" });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          const ev = new ClipboardEvent("paste", {
+            clipboardData: dt,
+            bubbles: true,
+            cancelable: true,
+          });
+          editor.dispatchEvent(ev);
+        }, { b64, sel: bodySel });
+        await page.waitForTimeout(8000);
+      } catch (e) {
+        console.error(`[publish] insert failed at ${marker}:`, String(e.message).slice(0, 150));
+      }
+    }
+    await page.waitForTimeout(3000);
 
     if (input.publish) {
       // 「公開に進む」→ 公開設定画面 → 「投稿する」or「公開する」
@@ -259,6 +387,90 @@ async function run(input) {
     }
   } catch (e) {
     return { status: "error", error: String(e?.message || e) };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    else await ctx.close().catch(() => {});
+    if (browserChild && !browserChild.killed) browserChild.kill();
+  }
+}
+
+/** ページ内のどこかにある <input type="file"> に setInputFiles する */
+async function setFileInAnyInput(page, path) {
+  const fileInput = page.locator('input[type="file"]').last();
+  const count = await fileInput.count();
+  if (count === 0) return false;
+  await fileInput.setInputFiles(path).catch(() => {});
+  return true;
+}
+
+/** ターゲット要素に drop イベントを発火 (drag&drop emulation) */
+async function dropFileOnEditor(page, path, sel) {
+  const b64 = readFileSync(path).toString("base64");
+  await page.evaluate(async ({ b64, sel }) => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    const byteStr = atob(b64);
+    const bytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "image/png" });
+    const file = new File([blob], "image.png", { type: "image/png" });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    for (const name of ["dragenter", "dragover", "drop"]) {
+      const ev = new DragEvent(name, { dataTransfer: dt, bubbles: true, cancelable: true });
+      el.dispatchEvent(ev);
+    }
+  }, { b64, sel });
+}
+
+async function inspectAfterClickFlow(cookieDir) {
+  console.error("[inspect-click] opening note editor and clicking 画像を追加...");
+  const persist = existsSync(join(cookieDir, "browser-profile"));
+  const { ctx, browser, browserChild } = await launchContext(cookieDir, true, persist);
+  try {
+    const page = await ctx.newPage();
+    page.on("filechooser", (fc) => console.error("[filechooser event fired!]", fc.element().toString()));
+    await page.goto("https://note.com/notes/new", { waitUntil: "networkidle", timeout: 60000 });
+    await page.waitForURL(/\/edit\//, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(8000);
+    // Click body first to make toolbar appear
+    await page.locator('div.ProseMirror[contenteditable="true"]').first().click();
+    await page.waitForTimeout(1000);
+    // Before click
+    console.error("=== BEFORE CLICK ===");
+    const before = await page.evaluate(() => ({
+      totalNodes: document.querySelectorAll("*").length,
+      fileInputs: document.querySelectorAll('input[type="file"]').length,
+    }));
+    console.error(JSON.stringify(before));
+    // Click
+    await page.getByRole("button", { name: "画像を追加" }).first().click({ timeout: 5000 });
+    await page.waitForTimeout(2000);
+    console.error("=== AFTER CLICK ===");
+    const after = await page.evaluate(() => {
+      const fileInputs = Array.from(document.querySelectorAll('input[type="file"]'));
+      return {
+        totalNodes: document.querySelectorAll("*").length,
+        fileInputCount: fileInputs.length,
+        fileInputs: fileInputs.map((f) => ({
+          accept: f.accept, name: f.name, id: f.id,
+          hidden: f.hidden, styleDisplay: getComputedStyle(f).display,
+          parent: f.parentElement?.className?.slice(0, 100) || "",
+        })),
+        buttons: Array.from(document.querySelectorAll("button")).slice(0, 15).map(b => ({
+          aria: b.getAttribute("aria-label") || "",
+          text: (b.textContent || "").trim().slice(0, 40),
+          cls: b.className.slice(0, 40),
+        })),
+        dialogs: Array.from(document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"]')).slice(0, 5).map(d => ({
+          role: d.getAttribute("role") || "",
+          cls: d.className.slice(0, 80),
+          textHead: (d.textContent || "").trim().slice(0, 100),
+        })),
+      };
+    });
+    console.log(JSON.stringify(after, null, 2));
+    await page.screenshot({ path: resolve(cookieDir, "inspect-click.png"), fullPage: true });
   } finally {
     if (browser) await browser.close().catch(() => {});
     else await ctx.close().catch(() => {});
@@ -355,6 +567,12 @@ async function main() {
   if (inspectIdx >= 0) {
     const cookieDir = args[inspectIdx + 1] ?? ".cookies";
     await inspectFlow(cookieDir);
+    process.exit(0);
+  }
+  const inspectClickIdx = args.indexOf("--inspect-click");
+  if (inspectClickIdx >= 0) {
+    const cookieDir = args[inspectClickIdx + 1] ?? ".cookies";
+    await inspectAfterClickFlow(cookieDir);
     process.exit(0);
   }
 
