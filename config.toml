@@ -1,0 +1,26 @@
+# note-auto 設定ファイル
+
+[trends]
+# 直近何時間のトレンドを見るか
+window_hours = 24
+# 1ソースあたり最大取得件数
+max_per_source = 20
+# 有効化するソース: x, google, note, hn, reddit
+# 注: reddit は Cloudflare の TLS フィンガープリンティングにより rustls では 403 になる。
+# Phase 2 で OAuth 対応予定。当面は無効のままで運用する。
+sources = ["x", "google", "note", "hn"]
+# Reddit 対象 subreddit
+subreddits = ["programming", "technology", "MachineLearning", "LocalLLaMA"]
+# xAI API キーは環境変数 XAI_API_KEY で注入推奨
+# xai_api_key = "xai-..."
+
+[scoring]
+# 重複判定の類似度閾値 (0-1)
+dedup_threshold = 0.65
+
+[scoring.source_weights]
+x = 1.2
+google = 1.0
+note = 1.1
+hn = 0.9
+reddit = 0.8
