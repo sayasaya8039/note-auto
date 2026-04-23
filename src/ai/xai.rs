@@ -47,15 +47,12 @@ impl<'a> GrokClient<'a> {
             trend.item.summary.clone().unwrap_or_default(),
         );
 
+        // NOTE: xAI search_parameters は 2026-04 deprecated。Agent Tools API 移行待ち。
+        // 当面は Grok のモデル内知識で research を代替する。citations は空で返る可能性あり。
         let body = json!({
             "model": self.model,
             "stream": false,
-            "temperature": 0.2,
-            "search_parameters": {
-                "mode": "on",
-                "sources": [{"type": "web"}, {"type": "x"}],
-                "return_citations": true
-            },
+            "temperature": 0.3,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}

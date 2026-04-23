@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::ai::{
-    anthropic::AnthropicClient, http_client, openai::OpenAiImageClient, xai::GrokClient,
-    ArticleBrief, ArticleDraft, ImageAsset, ResearchResult,
+    anthropic::AnthropicClient, http_client, openai::OpenAiImageClient, pollo::PolloClient,
+    xai::GrokClient, ArticleBrief, ArticleDraft, ImageAsset, ResearchResult,
 };
 use crate::config::Config;
 use crate::scoring::SelectedTrend;
@@ -107,20 +107,17 @@ async fn write_one(
     };
     tracing::debug!(index, chars = draft.char_count, "body done");
 
-    // 4. 画像 (OpenAI) — エラーは warn して継続
+    // 4. 画像 — provider 切替 (pollo / openai)。失敗は warn して継続。
     let image: Option<ImageAsset> = if dry_run {
         None
-    } else if let Some(key) = cfg.writer.openai_api_key.as_deref() {
-        let client = OpenAiImageClient::new(&http, key, &cfg.writer.image_model, &cfg.writer.image_size);
-        match client.generate(&brief).await {
-            Ok(img) => Some(img),
+    } else {
+        match generate_image(cfg, &http, &brief).await {
+            Ok(img) => img,
             Err(e) => {
                 tracing::warn!(error = %e, "image generation failed, continuing without image");
                 None
             }
         }
-    } else {
-        None
     };
 
     // 5. 保存
@@ -158,6 +155,32 @@ async fn write_one(
         image_path,
         source_url: trend.item.url.clone(),
     })
+}
+
+async fn generate_image(
+    cfg: &Config,
+    http: &reqwest::Client,
+    brief: &ArticleBrief,
+) -> anyhow::Result<Option<ImageAsset>> {
+    match cfg.writer.image_provider.as_str() {
+        "pollo" => {
+            let Some(key) = cfg.writer.pollo_api_key.as_deref() else {
+                tracing::info!("POLLO_API_KEY 未設定 — 画像スキップ");
+                return Ok(None);
+            };
+            let client = PolloClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size);
+            Ok(Some(client.generate(brief).await?))
+        }
+        "openai" => {
+            let Some(key) = cfg.writer.openai_api_key.as_deref() else {
+                tracing::info!("OPENAI_API_KEY 未設定 — 画像スキップ");
+                return Ok(None);
+            };
+            let client = OpenAiImageClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size);
+            Ok(Some(client.generate(brief).await?))
+        }
+        other => Err(anyhow!("unknown image_provider: {}", other)),
+    }
 }
 
 fn sanitize_slug(raw: &str, fallback_idx: usize) -> String {

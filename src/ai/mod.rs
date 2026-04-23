@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod openai;
+pub mod pollo;
 pub mod xai;
 
 /// Haiku が出力する記事ブリーフ

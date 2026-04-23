@@ -68,6 +68,12 @@ pub struct WriterConfig {
     /// OpenAI API キー (env: OPENAI_API_KEY)
     #[serde(default = "env_openai_key")]
     pub openai_api_key: Option<String>,
+    /// Pollo AI API キー (env: POLLO_API_KEY) — 代替画像プロバイダ
+    #[serde(default = "env_pollo_key")]
+    pub pollo_api_key: Option<String>,
+    /// 画像プロバイダ: "pollo" | "openai" (default: pollo if key set, else openai)
+    #[serde(default = "default_image_provider")]
+    pub image_provider: String,
     /// 本文執筆モデル
     #[serde(default = "default_opus_model")]
     pub opus_model: String,
@@ -99,6 +105,8 @@ impl Default for WriterConfig {
         Self {
             anthropic_api_key: env_anthropic_key(),
             openai_api_key: env_openai_key(),
+            pollo_api_key: env_pollo_key(),
+            image_provider: default_image_provider(),
             opus_model: default_opus_model(),
             haiku_model: default_haiku_model(),
             grok_model: default_grok_model(),
@@ -191,6 +199,8 @@ impl Default for ScheduleConfig {
 fn env_xai_key() -> Option<String> { std::env::var("XAI_API_KEY").ok() }
 fn env_anthropic_key() -> Option<String> { std::env::var("ANTHROPIC_API_KEY").ok() }
 fn env_openai_key() -> Option<String> { std::env::var("OPENAI_API_KEY").ok() }
+fn env_pollo_key() -> Option<String> { std::env::var("POLLO_API_KEY").ok() }
+fn default_image_provider() -> String { "pollo".into() }
 fn env_x_api_key() -> Option<String> { std::env::var("X_API_KEY").ok() }
 fn env_x_api_secret() -> Option<String> { std::env::var("X_API_SECRET").ok() }
 fn env_x_access_token() -> Option<String> { std::env::var("X_ACCESS_TOKEN").ok() }
@@ -225,8 +235,11 @@ fn default_dedup() -> f64 { 0.65 }
 fn default_opus_model() -> String { "claude-opus-4-7".into() }
 fn default_haiku_model() -> String { "claude-haiku-4-5-20251001".into() }
 fn default_grok_model() -> String { "grok-3-latest".into() }
-fn default_image_model() -> String { "gpt-image-1".into() }
-fn default_image_size() -> String { "1536x1024".into() }
+// pollo モデル名 (例: "openai-gpt-image-2-0" / "openai-gpt-image-1-5" / "gpt-4o" / "dall-e-3")
+// OpenAI 直呼びの場合は "gpt-image-1" / "dall-e-3"
+fn default_image_model() -> String { "openai-gpt-image-2-0".into() }
+// pollo 使用時は "16:9", openai 直呼びは "1536x1024"
+fn default_image_size() -> String { "16:9".into() }
 fn default_article_chars() -> usize { 3000 }
 fn default_max_tokens() -> u32 { 8000 }
 
@@ -247,6 +260,7 @@ impl Config {
         if cfg.trends.xai_api_key.is_none() { cfg.trends.xai_api_key = env_xai_key(); }
         if cfg.writer.anthropic_api_key.is_none() { cfg.writer.anthropic_api_key = env_anthropic_key(); }
         if cfg.writer.openai_api_key.is_none() { cfg.writer.openai_api_key = env_openai_key(); }
+        if cfg.writer.pollo_api_key.is_none() { cfg.writer.pollo_api_key = env_pollo_key(); }
         if cfg.publish.x_api_key.is_none() { cfg.publish.x_api_key = env_x_api_key(); }
         if cfg.publish.x_api_secret.is_none() { cfg.publish.x_api_secret = env_x_api_secret(); }
         if cfg.publish.x_access_token.is_none() { cfg.publish.x_access_token = env_x_access_token(); }

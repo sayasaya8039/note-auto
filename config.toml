@@ -34,8 +34,14 @@ reddit = 0.8
 opus_model = "claude-opus-4-7"
 haiku_model = "claude-haiku-4-5-20251001"
 grok_model = "grok-3-latest"
-image_model = "gpt-image-1"
-image_size = "1536x1024"
+
+# 画像プロバイダ: "pollo" (推奨、OpenAI billing制約なし) or "openai"
+image_provider = "pollo"
+# pollo: "openai-gpt-image-2-0" / "openai-gpt-image-1-5" / "gpt-4o" / "dall-e-3" / "flux-2-max" 等
+# openai 直: "gpt-image-1" / "dall-e-3"
+image_model = "openai-gpt-image-2-0"
+# pollo: "16:9" / "1:1" / "9:16"  |  openai: "1536x1024" / "1024x1024"
+image_size = "16:9"
 
 target_chars = 3000
 max_tokens = 8000

@@ -27,17 +27,16 @@ note記事化して日本の読者に価値が出そうなトピックを {top_n
 [{{\"title\": \"...\", \"summary\": \"1-2文\", \"url\": \"代表投稿URL\", \"score\": 1-100の数値}}, ...]"
     );
 
+    // NOTE: xAI の search_parameters は 2026-04 に deprecated (410 Gone) になり
+    // Agent Tools API (https://docs.x.ai/docs/guides/tools/overview) へ移行する必要がある。
+    // 当面は Grok モデルの学習データベースの知識でトピック案を出す。
+    // 実時間 X トレンドは Phase 1b で Agent Tools API 対応時に復活させる。
     let body = json!({
         "model": MODEL,
         "stream": false,
-        "temperature": 0.2,
-        "search_parameters": {
-            "mode": "on",
-            "sources": [{"type": "x"}],
-            "return_citations": true
-        },
+        "temperature": 0.3,
         "messages": [
-            {"role": "system", "content": "出力は厳密にJSON配列のみ。前後に説明文を入れない。"},
+            {"role": "system", "content": "出力は厳密にJSON配列のみ。前後に説明文を入れない。あなたは X と web に関する最新知識を持つアナリスト。"},
             {"role": "user", "content": prompt}
         ]
     });
