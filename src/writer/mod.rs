@@ -175,14 +175,16 @@ async fn generate_images(
         let cfg = cfg.clone();
         let http = http.clone();
         let prompt = p.clone();
+        // Hero (i==0) は high 品質、インライン (i>=1) は low 品質
+        let quality = if i == 0 { "high" } else { "low" };
         async move {
-            match generate_single_image(&cfg, &http, &prompt).await {
+            match generate_single_image(&cfg, &http, &prompt, quality).await {
                 Ok(img) => {
-                    tracing::info!(idx = i, "image ready");
+                    tracing::info!(idx = i, quality = %quality, "image ready");
                     Some(img)
                 }
                 Err(e) => {
-                    tracing::warn!(idx = i, error = %e, "image failed, skipping");
+                    tracing::warn!(idx = i, quality = %quality, error = %e, "image failed, skipping");
                     None
                 }
             }
@@ -195,13 +197,14 @@ async fn generate_single_image(
     cfg: &Config,
     http: &reqwest::Client,
     prompt: &str,
+    quality: &str,
 ) -> anyhow::Result<ImageAsset> {
     match cfg.writer.image_provider.as_str() {
         "pollo" => {
             let key = cfg.writer.pollo_api_key.as_deref()
                 .ok_or_else(|| anyhow!("POLLO_API_KEY 未設定"))?;
             PolloClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
-                .with_quality("high")
+                .with_quality(quality)
                 .generate_with_prompt(prompt).await
         }
         "openai" => {
