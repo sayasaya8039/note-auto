@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::ai::{
-    anthropic::AnthropicClient, http_client, openai::OpenAiImageClient, pollo::PolloClient,
-    xai::GrokClient, ArticleBrief, ArticleDraft, ImageAsset, ResearchResult,
+    anthropic::AnthropicClient, http_client, nvidia::NvidiaFluxClient, openai::OpenAiImageClient,
+    pollo::PolloClient, xai::GrokClient, ArticleBrief, ArticleDraft, ImageAsset, ResearchResult,
 };
 use crate::config::Config;
 use crate::scoring::SelectedTrend;
@@ -122,7 +122,32 @@ async fn write_one(
         generate_images(cfg, &http, &brief_for_images, dry_run),
     );
     let draft = draft_res?;
-    let images = images_res; // Vec<Option<ImageAsset>> (常に長さ 4)
+    let mut images = images_res; // Vec<Option<ImageAsset>> (常に長さ 4)
+
+    // konbini/hyakkin ソース由来 → ソース公式画像で inline (idx 1..=3) を上書き
+    let source = trend.item.source.as_str();
+    if matches!(source, "konbini" | "hyakkin") && !trend.item.image_urls.is_empty() && !dry_run {
+        let downloaded =
+            download_source_images(&http, &trend.item.image_urls, 3).await;
+        let mut replaced = 0;
+        for (slot, img_opt) in downloaded.into_iter().enumerate() {
+            let target_idx = slot + 1; // images[0] は hero、1..=3 が inline
+            if target_idx >= images.len() {
+                break;
+            }
+            if let Some(img) = img_opt {
+                images[target_idx] = Some(img);
+                replaced += 1;
+            }
+        }
+        tracing::info!(
+            index,
+            source,
+            replaced,
+            available = trend.item.image_urls.len(),
+            "source images replaced inline slots"
+        );
+    }
     tracing::info!(index, chars = draft.char_count, "body done");
 
     // 4. 画像ファイル保存 + placeholder 置換
@@ -199,6 +224,13 @@ async fn generate_single_image(
     prompt: &str,
     quality: &str,
 ) -> anyhow::Result<ImageAsset> {
+    // 本文挿入用 (low quality) は NVIDIA flux.2-klein-4b を優先使用。
+    // NVIDIA キー未設定の場合は通常プロバイダにフォールバック。
+    if quality == "low" {
+        if let Some(key) = cfg.writer.nvidia_api_key.as_deref() {
+            return NvidiaFluxClient::new(http, key).generate_prompt(prompt).await;
+        }
+    }
     match cfg.writer.image_provider.as_str() {
         "pollo" => {
             let key = cfg.writer.pollo_api_key.as_deref()
@@ -213,8 +245,79 @@ async fn generate_single_image(
             OpenAiImageClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
                 .generate_prompt(prompt).await
         }
+        "nvidia" => {
+            let key = cfg.writer.nvidia_api_key.as_deref()
+                .ok_or_else(|| anyhow!("NVIDIA_API_KEY 未設定"))?;
+            NvidiaFluxClient::new(http, key).generate_prompt(prompt).await
+        }
         other => Err(anyhow!("unknown image_provider: {}", other)),
     }
+}
+
+/// ソース公式 URL から画像を最大 max_count 件並行ダウンロード。
+/// 失敗 / 容量不足 / 異常 MIME は None を返し、AI 生成のフォールバックを残す。
+async fn download_source_images(
+    http: &reqwest::Client,
+    urls: &[String],
+    max_count: usize,
+) -> Vec<Option<ImageAsset>> {
+    use futures::future::join_all;
+    let candidates: Vec<&String> = urls
+        .iter()
+        .filter(|u| u.starts_with("http"))
+        .take(max_count)
+        .collect();
+    if candidates.is_empty() {
+        return vec![None; max_count];
+    }
+    let futs = candidates.iter().enumerate().map(|(i, u)| {
+        let http = http.clone();
+        let url = (*u).clone();
+        async move {
+            let resp = match http
+                .get(&url)
+                .header("Referer", "https://www.google.com/")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                )
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(idx = i, url = %url, error = %e, "source image fetch failed");
+                    return None;
+                }
+            };
+            if !resp.status().is_success() {
+                tracing::warn!(idx = i, url = %url, status = %resp.status(), "source image non-2xx");
+                return None;
+            }
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(idx = i, url = %url, error = %e, "source image body failed");
+                    return None;
+                }
+            };
+            // 最低 1KB / 最大 5MB のサイズ妥当性チェック
+            if bytes.len() < 1024 || bytes.len() > 5 * 1024 * 1024 {
+                tracing::warn!(idx = i, url = %url, size = bytes.len(), "source image size out of range");
+                return None;
+            }
+            tracing::info!(idx = i, url = %url, size = bytes.len(), "source image downloaded");
+            Some(ImageAsset {
+                prompt: format!("source-image:{url}"),
+                png_bytes: bytes.to_vec(),
+            })
+        }
+    });
+    let mut results: Vec<Option<ImageAsset>> = join_all(futs).await;
+    while results.len() < max_count {
+        results.push(None);
+    }
+    results
 }
 
 /// 画像を保存し、本文中の {{IMAGE_HEADER}} / {{IMAGE_1..3}} を markdown 画像リンクに置換
@@ -228,17 +331,19 @@ fn embed_images(
     let mut hero_path: Option<PathBuf> = None;
     let mut inline_paths: Vec<PathBuf> = Vec::new();
 
-    let filenames = [
-        ("{{IMAGE_HEADER}}", format!("{slug}-hero.png")),
-        ("{{IMAGE_1}}", format!("{slug}-1.png")),
-        ("{{IMAGE_2}}", format!("{slug}-2.png")),
-        ("{{IMAGE_3}}", format!("{slug}-3.png")),
+    let stems = [
+        ("{{IMAGE_HEADER}}", format!("{slug}-hero")),
+        ("{{IMAGE_1}}", format!("{slug}-1")),
+        ("{{IMAGE_2}}", format!("{slug}-2")),
+        ("{{IMAGE_3}}", format!("{slug}-3")),
     ];
 
-    for (i, (placeholder, fname)) in filenames.iter().enumerate() {
+    for (i, (placeholder, stem)) in stems.iter().enumerate() {
         match images.get(i).and_then(|o| o.as_ref()) {
             Some(img) => {
-                let path = out_dir.join(fname);
+                let ext = detect_image_ext(&img.png_bytes);
+                let fname = format!("{stem}.{ext}");
+                let path = out_dir.join(&fname);
                 std::fs::write(&path, &img.png_bytes)?;
                 let alt = if i == 0 { "hero" } else { &format!("image {i}") };
                 let md_link = format!("![{alt}]({fname})");
@@ -257,6 +362,15 @@ fn embed_images(
     }
 
     Ok((hero_path, inline_paths, body))
+}
+
+/// 画像バイト列のマジックナンバーから拡張子を判定する。
+/// NVIDIA flux.2 は JPEG、OpenAI/Pollo は PNG を返すため実体に合わせる。
+fn detect_image_ext(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" { return "png"; }
+    if bytes.len() >= 3 && &bytes[..3] == b"\xff\xd8\xff" { return "jpg"; }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { return "webp"; }
+    "png" // 不明時は既存挙動に合わせて png 拡張子
 }
 
 /// Hero (見出し) 画像専用プロンプト。

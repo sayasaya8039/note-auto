@@ -32,6 +32,10 @@ pub struct TrendItem {
     /// エンゲージ系メトリクス（表示用）
     #[serde(default)]
     pub metrics: serde_json::Value,
+    /// ソースから取得した画像URL（konbini/hyakkin の Playwright スクレイプで埋まる）
+    /// 記事生成時、本文挿入画像はこの URL からダウンロードして優先利用する。
+    #[serde(default)]
+    pub image_urls: Vec<String>,
     /// 取得時刻
     pub fetched_at: DateTime<Utc>,
 }
@@ -45,6 +49,7 @@ impl TrendItem {
             url: None,
             raw_score: 0.0,
             metrics: serde_json::Value::Null,
+            image_urls: Vec::new(),
             fetched_at: Utc::now(),
         }
     }

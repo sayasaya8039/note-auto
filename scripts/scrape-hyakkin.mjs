@@ -41,12 +41,19 @@ async function scrapeDaiso(page) {
       "a[href*='/Page/Item/'], .new-arrival a, .product-item a",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || e.getAttribute("aria-label") || "")
-              .trim()
-              .replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .product-item, .new-arrival, article") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || e.getAttribute("aria-label") || "")
+                .trim()
+                .replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
@@ -71,10 +78,17 @@ async function scrapeSeria(page) {
       ".new_item a, .item_box a, a[href*='item']",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || "").trim().replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .item_box, .item-list, article") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || "").trim().replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
@@ -99,10 +113,17 @@ async function scrapeCando(page) {
       ".item-list a, .new-item a, a[href*='/item/']",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || "").trim().replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .item_box, .item-list, article") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || "").trim().replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
@@ -127,10 +148,17 @@ async function scrapeWatts(page) {
       ".new-item a, .product a, a[href*='item']",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || "").trim().replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .item_box, .item-list, article") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || "").trim().replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );

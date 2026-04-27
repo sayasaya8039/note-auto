@@ -20,6 +20,9 @@ pub struct SidecarItem {
     pub score: Option<f64>,
     #[serde(default)]
     pub chain: Option<String>,
+    /// 商品ページから抽出した画像 URL（複数可）。記事の inline 画像に流用される。
+    #[serde(default)]
+    pub image_urls: Vec<String>,
 }
 
 /// `node <script>` を spawn し、stdin に top_n を投げて stdout の JSON 配列を取得する。
@@ -100,6 +103,11 @@ pub async fn run(
             if let Some(chain) = i.chain {
                 t.metrics = serde_json::json!({ "chain": chain });
             }
+            t.image_urls = i
+                .image_urls
+                .into_iter()
+                .filter(|u| u.starts_with("http"))
+                .collect();
             t
         })
         .collect();

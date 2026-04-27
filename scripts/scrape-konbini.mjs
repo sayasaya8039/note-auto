@@ -40,10 +40,17 @@ async function scrapeSeven(page) {
       "a[href*='/products/a/item/'], .item_list li a, .productList a",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || "").trim().replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .item, article, .productCard") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || "").trim().replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
@@ -68,10 +75,17 @@ async function scrapeLawson(page) {
       "a[href*='/recommend/new/'], .new-item-list li a, article a",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || "").trim().replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest("li, .item, article, .new-item") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || "").trim().replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
@@ -96,12 +110,19 @@ async function scrapeFamilyMart(page) {
       ".splide__slideItem a, .ly-mnav-side-newproducts a, a[href*='/goods/']",
       (els) =>
         els
-          .map((e) => ({
-            title: (e.textContent || e.getAttribute("aria-label") || "")
-              .trim()
-              .replace(/\s+/g, " "),
-            url: e.href,
-          }))
+          .map((e) => {
+            const card = e.closest(".splide__slideItem, li, article") || e;
+            const img = card.querySelector("img");
+            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
+            const absSrc = src ? new URL(src, location.origin).href : "";
+            return {
+              title: (e.textContent || e.getAttribute("aria-label") || "")
+                .trim()
+                .replace(/\s+/g, " "),
+              url: e.href,
+              image_urls: absSrc ? [absSrc] : [],
+            };
+          })
           .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
           .slice(0, 30),
     );
