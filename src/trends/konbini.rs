@@ -1,25 +1,74 @@
 //! コンビニ来週新商品トレンド (セブン-イレブン / ローソン / ファミマ)
 //!
-//! Phase 1 (案2): xAI Grok の知識ベースから「来週発売予定の新商品」を抽出する。
-//! Phase 2 (案1): セブン `sej.co.jp/products/a/week_new/`、ローソン
-//! `lawson.co.jp/recommend/new/`、ファミマ `family.co.jp/goods.html` を
-//! HTML スクレイプして TrendItem 化する予定。
+//! Phase 2 ハイブリッドフェッチチェーン:
+//! 1. Playwright サイドカー (`scripts/scrape-konbini.mjs`) — 公式ページ直スクレイプ
+//! 2. Google News RSS (各チェーン × 新商品 クエリ) — 静的に確実
+//! 3. Grok 知識ベース — 最終フォールバック
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::trends::TrendItem;
+use crate::trends::{gnews_rss, sidecar, TrendItem};
 
 const ENDPOINT: &str = "https://api.x.ai/v1/chat/completions";
+const SIDECAR_SCRIPT: &str = "scripts/scrape-konbini.mjs";
+const SIDECAR_TIMEOUT_SECS: u64 = 90;
+
+const GNEWS_QUERIES: &[&str] = &[
+    "セブンイレブン 新商品",
+    "ローソン 新商品",
+    "ファミリーマート 新商品",
+    "コンビニ 来週 新商品",
+];
 
 pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendItem>> {
+    let top_n = cfg.trends.max_per_source.max(5);
+
+    // 1. Playwright サイドカー
+    let script_path = PathBuf::from(SIDECAR_SCRIPT);
+    match sidecar::run(&script_path, "konbini", top_n, SIDECAR_TIMEOUT_SECS).await {
+        Ok(items) if !items.is_empty() => {
+            tracing::info!(count = items.len(), "konbini: playwright sidecar OK");
+            return Ok(items);
+        }
+        Ok(_) => tracing::debug!("konbini: sidecar empty, fallback to gnews"),
+        Err(e) => tracing::warn!(error = %e, "konbini: sidecar failed, fallback to gnews"),
+    }
+
+    // 2. Google News RSS (複数クエリを並行)
+    let rss_futs = GNEWS_QUERIES.iter().map(|q| {
+        gnews_rss::fetch_query(client, "konbini", q, top_n.div_ceil(GNEWS_QUERIES.len()))
+    });
+    let rss_results = futures::future::join_all(rss_futs).await;
+    let mut rss_items = Vec::new();
+    for r in rss_results {
+        if let Ok(mut items) = r {
+            rss_items.append(&mut items);
+        }
+    }
+    if !rss_items.is_empty() {
+        tracing::info!(count = rss_items.len(), "konbini: gnews RSS OK");
+        rss_items.truncate(top_n);
+        return Ok(rss_items);
+    }
+
+    // 3. Grok 知識ベースフォールバック
+    tracing::info!("konbini: falling back to Grok knowledge");
+    grok_fallback(client, cfg, top_n).await
+}
+
+async fn grok_fallback(
+    client: &reqwest::Client,
+    cfg: &Config,
+    top_n: usize,
+) -> Result<Vec<TrendItem>> {
     let Some(api_key) = cfg.trends.xai_api_key.as_deref() else {
-        tracing::debug!("XAI_API_KEY 未設定 — konbini スキップ");
+        tracing::debug!("XAI_API_KEY 未設定 — konbini Grok フォールバックもスキップ");
         return Ok(vec![]);
     };
-    let top_n = cfg.trends.max_per_source.max(5);
     let model = &cfg.writer.grok_model;
 
     let prompt = format!(

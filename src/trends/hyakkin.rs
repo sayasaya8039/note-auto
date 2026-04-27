@@ -1,24 +1,74 @@
 //! 100均新商品トレンド (ダイソー / セリア / キャンドゥ / ワッツ)
 //!
-//! Phase 1 (案2): xAI Grok の知識ベースから直近の人気新商品を抽出する。
-//! Phase 2 (案1): ダイソー `jp.daisojapan.com/`、セリア `seria-group.com/`、
-//! キャンドゥ `cando-web.co.jp/item/new/` を HTML スクレイプして TrendItem 化する予定。
+//! Phase 2 ハイブリッドフェッチチェーン:
+//! 1. Playwright サイドカー (`scripts/scrape-hyakkin.mjs`) — 公式ページ直スクレイプ
+//! 2. Google News RSS (各チェーン × 新商品 クエリ) — 静的に確実
+//! 3. Grok 知識ベース — 最終フォールバック
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::trends::TrendItem;
+use crate::trends::{gnews_rss, sidecar, TrendItem};
 
 const ENDPOINT: &str = "https://api.x.ai/v1/chat/completions";
+const SIDECAR_SCRIPT: &str = "scripts/scrape-hyakkin.mjs";
+const SIDECAR_TIMEOUT_SECS: u64 = 90;
+
+const GNEWS_QUERIES: &[&str] = &[
+    "ダイソー 新商品",
+    "セリア 新商品",
+    "キャンドゥ 新商品",
+    "100均 新商品",
+];
 
 pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendItem>> {
+    let top_n = cfg.trends.max_per_source.max(5);
+
+    // 1. Playwright サイドカー
+    let script_path = PathBuf::from(SIDECAR_SCRIPT);
+    match sidecar::run(&script_path, "hyakkin", top_n, SIDECAR_TIMEOUT_SECS).await {
+        Ok(items) if !items.is_empty() => {
+            tracing::info!(count = items.len(), "hyakkin: playwright sidecar OK");
+            return Ok(items);
+        }
+        Ok(_) => tracing::debug!("hyakkin: sidecar empty, fallback to gnews"),
+        Err(e) => tracing::warn!(error = %e, "hyakkin: sidecar failed, fallback to gnews"),
+    }
+
+    // 2. Google News RSS (複数クエリを並行)
+    let rss_futs = GNEWS_QUERIES.iter().map(|q| {
+        gnews_rss::fetch_query(client, "hyakkin", q, top_n.div_ceil(GNEWS_QUERIES.len()))
+    });
+    let rss_results = futures::future::join_all(rss_futs).await;
+    let mut rss_items = Vec::new();
+    for r in rss_results {
+        if let Ok(mut items) = r {
+            rss_items.append(&mut items);
+        }
+    }
+    if !rss_items.is_empty() {
+        tracing::info!(count = rss_items.len(), "hyakkin: gnews RSS OK");
+        rss_items.truncate(top_n);
+        return Ok(rss_items);
+    }
+
+    // 3. Grok 知識ベースフォールバック
+    tracing::info!("hyakkin: falling back to Grok knowledge");
+    grok_fallback(client, cfg, top_n).await
+}
+
+async fn grok_fallback(
+    client: &reqwest::Client,
+    cfg: &Config,
+    top_n: usize,
+) -> Result<Vec<TrendItem>> {
     let Some(api_key) = cfg.trends.xai_api_key.as_deref() else {
-        tracing::debug!("XAI_API_KEY 未設定 — hyakkin スキップ");
+        tracing::debug!("XAI_API_KEY 未設定 — hyakkin Grok フォールバックもスキップ");
         return Ok(vec![]);
     };
-    let top_n = cfg.trends.max_per_source.max(5);
     let model = &cfg.writer.grok_model;
 
     let prompt = format!(

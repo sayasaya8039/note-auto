@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
+pub mod gnews_rss;
 pub mod google;
 pub mod google_news;
 pub mod hn;
@@ -12,6 +13,7 @@ pub mod hyakkin;
 pub mod konbini;
 pub mod note_rss;
 pub mod reddit;
+pub mod sidecar;
 pub mod x_grok;
 
 /// 1つのトレンド候補 (全ソース共通)
