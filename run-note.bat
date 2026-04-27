@@ -1,6 +1,7 @@
 @echo off
-REM note RSS 単独リサーチ — 1 記事生成
-REM 出力: drafts\YYYY-MM-DD\<slug>.md  /  ログ: logs\note_*.log
+chcp 65001 > nul
+REM note RSS only -- 1 article
+REM output: drafts\YYYY-MM-DD\<slug>.md  /  log: logs\note_*.log
 
 cd /d "%~dp0"
 if not exist logs mkdir logs

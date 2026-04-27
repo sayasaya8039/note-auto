@@ -1,6 +1,7 @@
 @echo off
-REM Hacker News 単独リサーチ — 1 記事生成
-REM 出力: drafts\YYYY-MM-DD\<slug>.md  /  ログ: logs\hn_*.log
+chcp 65001 > nul
+REM Hacker News only -- 1 article
+REM output: drafts\YYYY-MM-DD\<slug>.md  /  log: logs\hn_*.log
 
 cd /d "%~dp0"
 if not exist logs mkdir logs

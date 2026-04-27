@@ -1,7 +1,8 @@
 @echo off
-REM 全7ソース並列リサーチ — 既定 top=3 記事生成
-REM 出力: drafts\YYYY-MM-DD\<slug>.md  /  ログ: logs\all_*.log
-REM 設定: config.toml (デフォルト全ソース有効)
+chcp 65001 > nul
+REM all 7 sources -- top 3 articles
+REM output: drafts\YYYY-MM-DD\<slug>.md  /  log: logs\all_*.log
+REM uses default config.toml (all sources enabled)
 
 cd /d "%~dp0"
 if not exist logs mkdir logs

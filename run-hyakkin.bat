@@ -1,6 +1,7 @@
 @echo off
-REM 100均新商品 単独リサーチ — 1 記事生成 + 公式画像 inline 利用
-REM 出力: drafts\YYYY-MM-DD\<slug>.md  /  ログ: logs\hyakkin_*.log
+chcp 65001 > nul
+REM 100yen shops (Daiso/Seria/CanDo/Watts) only -- 1 article + source images
+REM output: drafts\YYYY-MM-DD\<slug>.md  /  log: logs\hyakkin_*.log
 
 cd /d "%~dp0"
 if not exist logs mkdir logs

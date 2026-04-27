@@ -1,6 +1,7 @@
 @echo off
-REM コンビニ来週新商品 単独リサーチ — 1 記事生成 + 公式画像 inline 利用
-REM 出力: drafts\YYYY-MM-DD\<slug>.md  /  ログ: logs\konbini_*.log
+chcp 65001 > nul
+REM Konbini (Seven/Lawson/FamilyMart) only -- 1 article + source images
+REM output: drafts\YYYY-MM-DD\<slug>.md  /  log: logs\konbini_*.log
 
 cd /d "%~dp0"
 if not exist logs mkdir logs
