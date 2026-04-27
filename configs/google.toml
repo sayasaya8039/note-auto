@@ -12,5 +12,7 @@ google = 2.0
 [schedule]
 daily_top = 1
 
+# note 自動投稿 / X 告知だけスキップ。Slack 進捗通知は受け取る。
 [publish]
-dry_run = true
+note_publish = false
+x_announce = false
