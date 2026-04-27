@@ -5,10 +5,12 @@
 window_hours = 24
 # 1ソースあたり最大取得件数
 max_per_source = 20
-# 有効化するソース: x, google, gnews, note, hn, reddit
+# 有効化するソース: x, google, gnews, note, hn, reddit, konbini, hyakkin
 # 注: reddit は Cloudflare の TLS フィンガープリンティングにより rustls では 403 になる。
 # Phase 2 で OAuth 対応予定。当面は無効のままで運用する。
-sources = ["x", "google", "gnews", "note", "hn"]
+# konbini: コンビニ来週新商品 (セブン/ローソン/ファミマ) — 現在 Grok ベース、後日 HTML スクレイプへ昇格
+# hyakkin: 100均新商品 (ダイソー/セリア/キャンドゥ/ワッツ) — 同上
+sources = ["x", "konbini", "hyakkin", "gnews", "google", "note", "hn"]
 # Reddit 対象 subreddit
 subreddits = ["programming", "technology", "MachineLearning", "LocalLLaMA"]
 # xAI API キーは環境変数 XAI_API_KEY で注入推奨
@@ -19,13 +21,15 @@ subreddits = ["programming", "technology", "MachineLearning", "LocalLLaMA"]
 dedup_threshold = 0.65
 
 [scoring.source_weights]
-# X 最優先 + Google News で国内ニュース拡充、note は下げる
-x = 1.6      # X 最優先 (多カテゴリ話題性)
-gnews = 1.4  # Google News 日本版 (top/world/nation/business/ent/science/sports/health)
-google = 1.2 # Google Trends 日本 (検索トレンド)
-note = 0.7   # note は優先度低め
-hn = 0.4     # 海外 tech 特化、影響最小
+# X 最優先化 + 生活トレンド (コンビニ/100均) を新規重視、Google Trends は減衰
+x = 2.0       # X さらに最優先 (多カテゴリ話題性)
+gnews = 1.4   # Google News 日本版 (top/world/nation/business/ent/science/sports/health)
+konbini = 1.3 # コンビニ来週新商品 (セブン/ローソン/ファミマ)
+hyakkin = 1.2 # 100均新商品 (ダイソー/セリア/キャンドゥ/ワッツ)
+google = 0.7  # Google Trends 日本 (検索トレンド) — 生活トレンドへ譲る
+note = 0.7    # note は優先度低め
 reddit = 0.8
+hn = 0.4      # 海外 tech 特化、影響最小
 
 [writer]
 # API キーは環境変数 or .env 推奨

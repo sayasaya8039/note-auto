@@ -71,6 +71,9 @@ pub struct WriterConfig {
     /// Pollo AI API キー (env: POLLO_API_KEY) — 代替画像プロバイダ
     #[serde(default = "env_pollo_key")]
     pub pollo_api_key: Option<String>,
+    /// NVIDIA Build API キー (env: NVIDIA_API_KEY) — 本文挿入画像 (low quality) 用
+    #[serde(default = "env_nvidia_key")]
+    pub nvidia_api_key: Option<String>,
     /// 画像プロバイダ: "pollo" | "openai" (default: pollo if key set, else openai)
     #[serde(default = "default_image_provider")]
     pub image_provider: String,
@@ -106,6 +109,7 @@ impl Default for WriterConfig {
             anthropic_api_key: env_anthropic_key(),
             openai_api_key: env_openai_key(),
             pollo_api_key: env_pollo_key(),
+            nvidia_api_key: env_nvidia_key(),
             image_provider: default_image_provider(),
             opus_model: default_opus_model(),
             haiku_model: default_haiku_model(),
@@ -204,6 +208,7 @@ fn env_xai_key() -> Option<String> { std::env::var("XAI_API_KEY").ok() }
 fn env_anthropic_key() -> Option<String> { std::env::var("ANTHROPIC_API_KEY").ok() }
 fn env_openai_key() -> Option<String> { std::env::var("OPENAI_API_KEY").ok() }
 fn env_pollo_key() -> Option<String> { std::env::var("POLLO_API_KEY").ok() }
+fn env_nvidia_key() -> Option<String> { std::env::var("NVIDIA_API_KEY").ok() }
 fn default_image_provider() -> String { "pollo".into() }
 fn env_x_api_key() -> Option<String> { std::env::var("X_API_KEY").ok() }
 fn env_x_api_secret() -> Option<String> { std::env::var("X_API_SECRET").ok() }
@@ -221,19 +226,29 @@ fn default_daily_top() -> usize { 3 }
 fn default_hours() -> u32 { 24 }
 fn default_per_source() -> usize { 20 }
 fn default_sources() -> Vec<String> {
-    vec!["x".into(), "google".into(), "gnews".into(), "note".into(), "hn".into()]
+    vec![
+        "x".into(),
+        "konbini".into(),
+        "hyakkin".into(),
+        "gnews".into(),
+        "google".into(),
+        "note".into(),
+        "hn".into(),
+    ]
 }
 fn default_subreddits() -> Vec<String> {
     vec!["programming".into(), "technology".into(), "MachineLearning".into()]
 }
 fn default_source_weights() -> std::collections::HashMap<String, f64> {
     let mut m = std::collections::HashMap::new();
-    m.insert("x".into(), 1.6);      // X を最優先 (多カテゴリ・話題性)
-    m.insert("gnews".into(), 1.4);  // Google News 日本版 (政治/経済/社会/エンタメ/科学/スポーツ)
-    m.insert("google".into(), 1.2); // 日本検索トレンド (国内ニュース寄り)
-    m.insert("note".into(), 0.7);   // note は多カテゴリ拡張済みだが優先度低め
-    m.insert("hn".into(), 0.4);     // 海外 tech 特化 (影響最小)
+    m.insert("x".into(), 2.0);       // X をさらに最優先 (多カテゴリ・話題性)
+    m.insert("gnews".into(), 1.4);   // Google News 日本版
+    m.insert("konbini".into(), 1.3); // コンビニ来週新商品 (セブン/ローソン/ファミマ)
+    m.insert("hyakkin".into(), 1.2); // 100均新商品 (ダイソー/セリア/キャンドゥ/ワッツ)
+    m.insert("google".into(), 0.7);  // 日本検索トレンド (生活トレンドへ譲り減衰)
+    m.insert("note".into(), 0.7);    // note は多カテゴリ拡張済みだが優先度低め
     m.insert("reddit".into(), 0.8);
+    m.insert("hn".into(), 0.4);      // 海外 tech 特化 (影響最小)
     m
 }
 fn default_dedup() -> f64 { 0.65 }
@@ -266,6 +281,7 @@ impl Config {
         if cfg.writer.anthropic_api_key.is_none() { cfg.writer.anthropic_api_key = env_anthropic_key(); }
         if cfg.writer.openai_api_key.is_none() { cfg.writer.openai_api_key = env_openai_key(); }
         if cfg.writer.pollo_api_key.is_none() { cfg.writer.pollo_api_key = env_pollo_key(); }
+        if cfg.writer.nvidia_api_key.is_none() { cfg.writer.nvidia_api_key = env_nvidia_key(); }
         if cfg.publish.x_api_key.is_none() { cfg.publish.x_api_key = env_x_api_key(); }
         if cfg.publish.x_api_secret.is_none() { cfg.publish.x_api_secret = env_x_api_secret(); }
         if cfg.publish.x_access_token.is_none() { cfg.publish.x_access_token = env_x_access_token(); }

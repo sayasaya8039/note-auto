@@ -8,6 +8,8 @@ use crate::config::Config;
 pub mod google;
 pub mod google_news;
 pub mod hn;
+pub mod hyakkin;
+pub mod konbini;
 pub mod note_rss;
 pub mod reddit;
 pub mod x_grok;
@@ -15,7 +17,7 @@ pub mod x_grok;
 /// 1つのトレンド候補 (全ソース共通)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrendItem {
-    /// ソース名: "x", "google", "note", "hn", "reddit"
+    /// ソース名: "x", "google", "gnews", "note", "hn", "reddit", "konbini", "hyakkin"
     pub source: String,
     /// トピックタイトル / キーワード
     pub title: String,
@@ -92,6 +94,16 @@ pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
     if enabled.contains("reddit") {
         futs.push(Box::pin(async {
             ("reddit", reddit::fetch(&client, cfg).await)
+        }));
+    }
+    if enabled.contains("konbini") {
+        futs.push(Box::pin(async {
+            ("konbini", konbini::fetch(&client, cfg).await)
+        }));
+    }
+    if enabled.contains("hyakkin") {
+        futs.push(Box::pin(async {
+            ("hyakkin", hyakkin::fetch(&client, cfg).await)
         }));
     }
 
