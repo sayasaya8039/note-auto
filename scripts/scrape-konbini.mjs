@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /**
- * コンビニ来週新商品スクレイパー (Playwright サイドカー)
+ * コンビニ来週新商品スクレイパー (Playwright サイドカー) v2
  *
  * 入力: stdin に { "top_n": N } JSON
- * 出力: stdout に [{title, summary, url, score, chain}, ...] JSON
- * stderr にログ
+ * 出力: stdout に [{title, summary, url, score, chain, image_urls[]}, ...] JSON
  *
- * 対象:
- *   - セブン-イレブン:    https://www.sej.co.jp/products/a/week_new/
- *   - ローソン:           https://www.lawson.co.jp/recommend/new/
- *   - ファミリーマート:   https://www.family.co.jp/goods.html
+ * v2 改良:
+ *   - lazy-load 属性を網羅 (data-src / data-lazy-src / data-original / srcset)
+ *   - <picture> / <source> 対応
+ *   - og:image をページ全体フォールバックに採用
+ *   - URL/タイトル下限フィルタ強化 (実商品リンクのみ)
+ *   - 画像サイズフィルタ (width/height 属性 <100 は捨てる)
  */
 
 import { chromium } from "playwright";
@@ -21,116 +22,105 @@ async function readStdin() {
   for await (const c of process.stdin) chunks.push(c);
   const txt = Buffer.concat(chunks).toString("utf8").trim();
   if (!txt) return {};
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(txt); } catch { return {}; }
 }
 
-async function scrapeSeven(page) {
-  const items = [];
-  try {
-    await page.goto("https://www.sej.co.jp/products/a/week_new/", {
-      waitUntil: "networkidle",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(1500);
-    const found = await page.$$eval(
-      "a[href*='/products/a/item/'], .item_list li a, .productList a",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .item, article, .productCard") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || "").trim().replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
-    );
-    for (const f of found) {
-      items.push({ ...f, chain: "セブン-イレブン", score: 70 });
-    }
-  } catch (e) {
-    log("seven failed:", e.message);
-  }
-  return items;
+/**
+ * ページから og:image / twitter:image を取得 (ページ全体フォールバック用)
+ */
+async function getOgImage(page) {
+  return await page.evaluate(() => {
+    const og = document.querySelector('meta[property="og:image"]')?.content
+      || document.querySelector('meta[name="twitter:image"]')?.content
+      || document.querySelector('meta[name="og:image"]')?.content;
+    return og || null;
+  }).catch(() => null);
 }
 
-async function scrapeLawson(page) {
-  const items = [];
-  try {
-    await page.goto("https://www.lawson.co.jp/recommend/new/", {
-      waitUntil: "networkidle",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(1500);
-    const found = await page.$$eval(
-      "a[href*='/recommend/new/'], .new-item-list li a, article a",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .item, article, .new-item") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || "").trim().replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
-    );
-    for (const f of found) {
-      items.push({ ...f, chain: "ローソン", score: 70 });
+/**
+ * カード DOM から画像 URL を抽出 (lazy-load 全パターン対応)
+ */
+const extractImageScript = `(card) => {
+  const candidates = [];
+  const imgs = card.querySelectorAll("img, source");
+  for (const img of imgs) {
+    const w = parseInt(img.getAttribute("width") || "0", 10);
+    const h = parseInt(img.getAttribute("height") || "0", 10);
+    if ((w > 0 && w < 80) || (h > 0 && h < 80)) continue;  // アイコン除外
+    for (const attr of ["src", "data-src", "data-lazy-src", "data-original", "data-image", "srcset"]) {
+      const raw = img.getAttribute(attr);
+      if (!raw) continue;
+      const first = raw.split(",")[0].trim().split(" ")[0];
+      if (first && !first.startsWith("data:")) {
+        try {
+          const abs = new URL(first, location.origin).href;
+          if (!/\\.(svg|gif)(\\?|$)/i.test(abs) && !/spacer|blank|1x1|loader/i.test(abs)) {
+            candidates.push(abs);
+          }
+        } catch {}
+      }
     }
-  } catch (e) {
-    log("lawson failed:", e.message);
+    // background-image style
+    const bg = img.style?.backgroundImage || "";
+    const m = bg.match(/url\\(['"]?([^'"\\)]+)['"]?\\)/);
+    if (m) {
+      try { candidates.push(new URL(m[1], location.origin).href); } catch {}
+    }
   }
-  return items;
-}
+  return [...new Set(candidates)].slice(0, 3);
+}`;
 
-async function scrapeFamilyMart(page) {
+async function scrapeChain(page, name, url, chain, score, anchorSelector, cardSelector, urlPattern) {
   const items = [];
   try {
-    await page.goto("https://www.family.co.jp/goods.html", {
-      waitUntil: "networkidle",
-      timeout: 30_000,
-    });
+    log(`fetching ${name}...`);
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    await page.waitForTimeout(2000);
+    // 遅延ロード対策にスクロール
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(1500);
+
+    const ogImage = await getOgImage(page);
+
     const found = await page.$$eval(
-      ".splide__slideItem a, .ly-mnav-side-newproducts a, a[href*='/goods/']",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest(".splide__slideItem, li, article") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || e.getAttribute("aria-label") || "")
-                .trim()
-                .replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
+      anchorSelector,
+      (els, args) => {
+        const { cardSelector, urlPattern, extractFnSrc } = args;
+        const extract = new Function("return " + extractFnSrc)();
+        const out = [];
+        const seen = new Set();
+        for (const e of els) {
+          const card = e.closest(cardSelector) || e;
+          const href = e.href || "";
+          const titleRaw = (e.textContent || e.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
+          // urlPattern が指定されてる場合のフィルタ
+          if (urlPattern && !new RegExp(urlPattern).test(href)) continue;
+          // タイトル品質フィルタ: 5文字以上 + 「日付のみ」「価格のみ」を除外
+          if (!titleRaw || titleRaw.length < 5 || titleRaw.length > 150) continue;
+          if (/^\d+\/\d+(発売)?$/.test(titleRaw) || /^¥?\d+円$/.test(titleRaw)) continue;
+          const key = href || titleRaw;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            title: titleRaw,
+            url: href,
+            image_urls: extract(card),
+          });
+          if (out.length >= 20) break;
+        }
+        return out;
+      },
+      { cardSelector, urlPattern, extractFnSrc: extractImageScript },
     );
+
     for (const f of found) {
-      items.push({ ...f, chain: "ファミリーマート", score: 70 });
+      // 画像が空なら og:image を 1 枚だけセット
+      if (f.image_urls.length === 0 && ogImage) f.image_urls = [ogImage];
+      items.push({ ...f, chain, score });
     }
+    log(`${name}: ${items.length} items, ${items.filter((i) => i.image_urls.length > 0).length} with images`);
   } catch (e) {
-    log("familymart failed:", e.message);
+    log(`${name} failed:`, e.message);
   }
   return items;
 }
@@ -150,7 +140,7 @@ function dedupe(items) {
 async function main() {
   const input = await readStdin();
   const topN = Math.max(5, input.top_n || 20);
-  log("starting, top_n =", topN);
+  log("starting v2, top_n =", topN);
 
   const browser = await chromium.launch({
     headless: true,
@@ -166,12 +156,40 @@ async function main() {
     const page = await ctx.newPage();
 
     const all = [];
-    all.push(...(await scrapeSeven(page)));
-    all.push(...(await scrapeLawson(page)));
-    all.push(...(await scrapeFamilyMart(page)));
+    all.push(...(await scrapeChain(
+      page,
+      "seven",
+      "https://www.sej.co.jp/products/a/week_new/",
+      "セブン-イレブン",
+      75,
+      "a[href*='/products/a/item/'], .item_list a[href*='/products/'], main a[href*='/products/']",
+      "li, .item, article, .productCard, .pbContainer",
+      "/products/a/(item|categry|category)",
+    )));
+    all.push(...(await scrapeChain(
+      page,
+      "lawson",
+      "https://www.lawson.co.jp/recommend/new/",
+      "ローソン",
+      75,
+      "a[href*='/recommend/'][href*='detail'], a[href*='/recommend/goods/'], main article a",
+      "li, article, .new-item, .product-item",
+      "lawson",
+    )));
+    all.push(...(await scrapeChain(
+      page,
+      "familymart",
+      "https://www.family.co.jp/goods.html",
+      "ファミリーマート",
+      75,
+      "a[href*='/goods/']:not([href$='goods.html']), .splide__slideItem a",
+      ".splide__slideItem, li, article, .ly-card",
+      "/goods/",
+    )));
 
     const deduped = dedupe(all).slice(0, topN);
-    log("collected:", deduped.length);
+    const withImg = deduped.filter((i) => i.image_urls.length > 0).length;
+    log(`collected: ${deduped.length} (${withImg} with images)`);
     process.stdout.write(JSON.stringify(deduped));
   } finally {
     await browser.close();

@@ -1,16 +1,11 @@
 #!/usr/bin/env node
 /**
- * 100均新商品スクレイパー (Playwright サイドカー)
+ * 100均新商品スクレイパー (Playwright サイドカー) v2
  *
  * 入力: stdin に { "top_n": N } JSON
- * 出力: stdout に [{title, summary, url, score, chain}, ...] JSON
- * stderr にログ
+ * 出力: stdout に [{title, summary, url, score, chain, image_urls[]}, ...] JSON
  *
- * 対象:
- *   - ダイソー:    https://jp.daisojapan.com/
- *   - セリア:      https://www.seria-group.com/
- *   - キャンドゥ:  https://www.cando-web.co.jp/item/new/
- *   - ワッツ:      https://watts-jp.com/
+ * v2 改良: scrape-konbini.mjs と同じ (lazy-load 網羅 / og:image fallback / URL+title フィルタ)
  */
 
 import { chromium } from "playwright";
@@ -22,151 +17,93 @@ async function readStdin() {
   for await (const c of process.stdin) chunks.push(c);
   const txt = Buffer.concat(chunks).toString("utf8").trim();
   if (!txt) return {};
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(txt); } catch { return {}; }
 }
 
-async function scrapeDaiso(page) {
+async function getOgImage(page) {
+  return await page.evaluate(() => {
+    return document.querySelector('meta[property="og:image"]')?.content
+      || document.querySelector('meta[name="twitter:image"]')?.content
+      || null;
+  }).catch(() => null);
+}
+
+const extractImageScript = `(card) => {
+  const candidates = [];
+  const imgs = card.querySelectorAll("img, source");
+  for (const img of imgs) {
+    const w = parseInt(img.getAttribute("width") || "0", 10);
+    const h = parseInt(img.getAttribute("height") || "0", 10);
+    if ((w > 0 && w < 80) || (h > 0 && h < 80)) continue;
+    for (const attr of ["src", "data-src", "data-lazy-src", "data-original", "data-image", "srcset"]) {
+      const raw = img.getAttribute(attr);
+      if (!raw) continue;
+      const first = raw.split(",")[0].trim().split(" ")[0];
+      if (first && !first.startsWith("data:")) {
+        try {
+          const abs = new URL(first, location.origin).href;
+          if (!/\\.(svg|gif)(\\?|$)/i.test(abs) && !/spacer|blank|1x1|loader/i.test(abs)) {
+            candidates.push(abs);
+          }
+        } catch {}
+      }
+    }
+    const bg = img.style?.backgroundImage || "";
+    const m = bg.match(/url\\(['"]?([^'"\\)]+)['"]?\\)/);
+    if (m) {
+      try { candidates.push(new URL(m[1], location.origin).href); } catch {}
+    }
+  }
+  return [...new Set(candidates)].slice(0, 3);
+}`;
+
+async function scrapeChain(page, name, url, chain, score, anchorSelector, cardSelector, urlPattern, waitUntil = "networkidle") {
   const items = [];
   try {
-    await page.goto("https://jp.daisojapan.com/", {
-      waitUntil: "networkidle",
-      timeout: 30_000,
-    });
+    log(`fetching ${name}...`);
+    await page.goto(url, { waitUntil, timeout: 30_000 });
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(1500);
-    const found = await page.$$eval(
-      "a[href*='/Page/Item/'], .new-arrival a, .product-item a",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .product-item, .new-arrival, article") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || e.getAttribute("aria-label") || "")
-                .trim()
-                .replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
-    );
-    for (const f of found) {
-      items.push({ ...f, chain: "ダイソー", score: 70 });
-    }
-  } catch (e) {
-    log("daiso failed:", e.message);
-  }
-  return items;
-}
 
-async function scrapeSeria(page) {
-  const items = [];
-  try {
-    await page.goto("https://www.seria-group.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(2000);
-    const found = await page.$$eval(
-      ".new_item a, .item_box a, a[href*='item']",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .item_box, .item-list, article") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || "").trim().replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
-    );
-    for (const f of found) {
-      items.push({ ...f, chain: "セリア", score: 65 });
-    }
-  } catch (e) {
-    log("seria failed:", e.message);
-  }
-  return items;
-}
+    const ogImage = await getOgImage(page);
 
-async function scrapeCando(page) {
-  const items = [];
-  try {
-    await page.goto("https://www.cando-web.co.jp/item/new/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(2000);
     const found = await page.$$eval(
-      ".item-list a, .new-item a, a[href*='/item/']",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .item_box, .item-list, article") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || "").trim().replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
+      anchorSelector,
+      (els, args) => {
+        const { cardSelector, urlPattern, extractFnSrc } = args;
+        const extract = new Function("return " + extractFnSrc)();
+        const out = [];
+        const seen = new Set();
+        for (const e of els) {
+          const card = e.closest(cardSelector) || e;
+          const href = e.href || "";
+          const titleRaw = (e.textContent || e.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
+          if (urlPattern && !new RegExp(urlPattern).test(href)) continue;
+          if (!titleRaw || titleRaw.length < 5 || titleRaw.length > 150) continue;
+          if (/^\d+\/\d+(発売)?$/.test(titleRaw) || /^¥?\d+円$/.test(titleRaw)) continue;
+          const key = href || titleRaw;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            title: titleRaw,
+            url: href,
+            image_urls: extract(card),
+          });
+          if (out.length >= 20) break;
+        }
+        return out;
+      },
+      { cardSelector, urlPattern, extractFnSrc: extractImageScript },
     );
-    for (const f of found) {
-      items.push({ ...f, chain: "キャンドゥ", score: 65 });
-    }
-  } catch (e) {
-    log("cando failed:", e.message);
-  }
-  return items;
-}
 
-async function scrapeWatts(page) {
-  const items = [];
-  try {
-    await page.goto("https://watts-jp.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(2000);
-    const found = await page.$$eval(
-      ".new-item a, .product a, a[href*='item']",
-      (els) =>
-        els
-          .map((e) => {
-            const card = e.closest("li, .item_box, .item-list, article") || e;
-            const img = card.querySelector("img");
-            const src = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
-            const absSrc = src ? new URL(src, location.origin).href : "";
-            return {
-              title: (e.textContent || "").trim().replace(/\s+/g, " "),
-              url: e.href,
-              image_urls: absSrc ? [absSrc] : [],
-            };
-          })
-          .filter((x) => x.title && x.title.length > 3 && x.title.length < 120)
-          .slice(0, 30),
-    );
     for (const f of found) {
-      items.push({ ...f, chain: "ワッツ", score: 60 });
+      if (f.image_urls.length === 0 && ogImage) f.image_urls = [ogImage];
+      items.push({ ...f, chain, score });
     }
+    log(`${name}: ${items.length} items, ${items.filter((i) => i.image_urls.length > 0).length} with images`);
   } catch (e) {
-    log("watts failed:", e.message);
+    log(`${name} failed:`, e.message);
   }
   return items;
 }
@@ -186,7 +123,7 @@ function dedupe(items) {
 async function main() {
   const input = await readStdin();
   const topN = Math.max(5, input.top_n || 20);
-  log("starting, top_n =", topN);
+  log("starting v2, top_n =", topN);
 
   const browser = await chromium.launch({
     headless: true,
@@ -202,13 +139,53 @@ async function main() {
     const page = await ctx.newPage();
 
     const all = [];
-    all.push(...(await scrapeDaiso(page)));
-    all.push(...(await scrapeSeria(page)));
-    all.push(...(await scrapeCando(page)));
-    all.push(...(await scrapeWatts(page)));
+    all.push(...(await scrapeChain(
+      page,
+      "daiso",
+      "https://jp.daisojapan.com/",
+      "ダイソー",
+      70,
+      "a[href*='/Page/Item/'], .new-arrival a, .product-item a, main a[href*='product']",
+      "li, .product-item, .new-arrival, article",
+      "/Page/Item/|product",
+    )));
+    all.push(...(await scrapeChain(
+      page,
+      "seria",
+      "https://www.seria-group.com/",
+      "セリア",
+      65,
+      ".new_item a, a[href*='item']:not([href*='login']):not([href*='cart']), main a[href*='/products/']",
+      "li, .item_box, .new_item, article",
+      "item|product",
+      "domcontentloaded",
+    )));
+    all.push(...(await scrapeChain(
+      page,
+      "cando",
+      "https://www.cando-web.co.jp/item/new/",
+      "キャンドゥ",
+      65,
+      ".item-list a[href*='/item/'], a[href*='/item/']:not([href$='/new/'])",
+      "li, .item-list, article",
+      "/item/",
+      "domcontentloaded",
+    )));
+    all.push(...(await scrapeChain(
+      page,
+      "watts",
+      "https://watts-jp.com/",
+      "ワッツ",
+      60,
+      ".new-item a, .product a, main a[href*='item']",
+      "li, .new-item, .product, article",
+      "item|product",
+      "domcontentloaded",
+    )));
 
     const deduped = dedupe(all).slice(0, topN);
-    log("collected:", deduped.length);
+    const withImg = deduped.filter((i) => i.image_urls.length > 0).length;
+    log(`collected: ${deduped.length} (${withImg} with images)`);
     process.stdout.write(JSON.stringify(deduped));
   } finally {
     await browser.close();
