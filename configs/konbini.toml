@@ -12,8 +12,8 @@ konbini = 2.0
 [schedule]
 daily_top = 1
 
-# 単独カテゴリ実行時は note 自動投稿 / X 告知だけスキップ。
+# 単独カテゴリ実行時は note 連携 (Playwright) と X 告知をスキップ。
 # Slack 進捗通知は受け取れるよう dry_run は false のまま。
 [publish]
-note_publish = false
+note_skip = true
 x_announce = false

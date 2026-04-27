@@ -44,6 +44,10 @@ pub async fn publish(cfg: &Config, article: &WrittenArticle) -> Result<PublishOu
         tracing::info!(slug = %article.slug, "[dry-run] note投稿スキップ");
         return Ok(PublishOutput { status: "skipped".into(), url: None });
     }
+    if cfg.publish.note_skip {
+        tracing::info!(slug = %article.slug, "note_skip=true → Playwright サイドカー起動を完全スキップ");
+        return Ok(PublishOutput { status: "skipped".into(), url: None });
+    }
 
     let script = &cfg.publish.playwright_script;
     if !std::path::Path::new(script).exists() {

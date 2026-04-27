@@ -12,7 +12,7 @@ google = 2.0
 [schedule]
 daily_top = 1
 
-# note 自動投稿 / X 告知だけスキップ。Slack 進捗通知は受け取る。
+# note 連携 (Playwright) と X 告知をスキップ。Slack 進捗通知は受け取る。
 [publish]
-note_publish = false
+note_skip = true
 x_announce = false

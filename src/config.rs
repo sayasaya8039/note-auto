@@ -138,6 +138,10 @@ pub struct PublishConfig {
     /// note 自動投稿 (true=公開ボタン押下、false=下書き保存のみ)
     #[serde(default)]
     pub note_publish: bool,
+    /// true で note 連携自体をスキップ (Playwright サイドカーを起動しない)。
+    /// テスト用 bat や Playwright 環境エラー時の回避策。
+    #[serde(default)]
+    pub note_skip: bool,
     /// X 告知投稿を有効化するか
     #[serde(default = "default_bool_true")]
     pub x_announce: bool,
@@ -168,6 +172,7 @@ impl Default for PublishConfig {
             playwright_runtime: default_playwright_runtime(),
             cookie_dir: default_cookie_dir(),
             note_publish: false,
+            note_skip: false,
             x_announce: true,
             x_api_key: env_x_api_key(),
             x_api_secret: env_x_api_secret(),
