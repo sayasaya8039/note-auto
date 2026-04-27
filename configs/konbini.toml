@@ -11,3 +11,8 @@ konbini = 2.0
 
 [schedule]
 daily_top = 1
+
+# 単独カテゴリ実行時は publish (note 自動投稿 / X 告知) をスキップ
+# 記事生成と画像取得の検証専用。実投稿は run-all.bat で行う。
+[publish]
+dry_run = true

@@ -11,3 +11,6 @@ hyakkin = 2.0
 
 [schedule]
 daily_top = 1
+
+[publish]
+dry_run = true
