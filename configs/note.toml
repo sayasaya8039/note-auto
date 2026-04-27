@@ -1,0 +1,13 @@
+# note RSS 単独リサーチ用設定
+# 用途: note 内の人気記事から 1 記事生成
+
+[trends]
+sources = ["note"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+note = 2.0
+
+[schedule]
+daily_top = 1

@@ -1,0 +1,13 @@
+# コンビニ来週新商品 単独リサーチ用設定
+# 用途: セブン/ローソン/ファミマ から 1 記事生成 + 公式画像 inline 利用
+
+[trends]
+sources = ["konbini"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+konbini = 2.0
+
+[schedule]
+daily_top = 1

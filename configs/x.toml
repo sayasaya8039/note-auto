@@ -1,0 +1,13 @@
+# X (Grok x_search) 単独リサーチ用設定
+# 用途: X トレンドだけからネタを拾って 1 記事生成
+
+[trends]
+sources = ["x"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+x = 2.0
+
+[schedule]
+daily_top = 1

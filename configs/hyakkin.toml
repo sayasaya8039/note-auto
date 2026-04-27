@@ -1,0 +1,13 @@
+# 100均新商品 単独リサーチ用設定
+# 用途: ダイソー/セリア/キャンドゥ/ワッツ から 1 記事生成 + 公式画像 inline 利用
+
+[trends]
+sources = ["hyakkin"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+hyakkin = 2.0
+
+[schedule]
+daily_top = 1

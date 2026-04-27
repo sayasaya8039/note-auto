@@ -1,0 +1,13 @@
+# Google Trends (日本) 単独リサーチ用設定
+# 用途: 検索トレンドから 1 記事生成
+
+[trends]
+sources = ["google"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+google = 2.0
+
+[schedule]
+daily_top = 1

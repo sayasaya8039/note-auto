@@ -1,0 +1,13 @@
+# Google News 日本版 単独リサーチ用設定
+# 用途: gnews カテゴリ (top/world/nation/business/ent/science/sports/health) から 1 記事生成
+
+[trends]
+sources = ["gnews"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+gnews = 2.0
+
+[schedule]
+daily_top = 1

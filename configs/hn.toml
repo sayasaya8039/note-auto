@@ -1,0 +1,13 @@
+# Hacker News 単独リサーチ用設定
+# 用途: 海外 tech トレンドから 1 記事生成
+
+[trends]
+sources = ["hn"]
+window_hours = 24
+max_per_source = 30
+
+[scoring.source_weights]
+hn = 2.0
+
+[schedule]
+daily_top = 1
