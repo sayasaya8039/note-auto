@@ -1,6 +1,6 @@
 [package]
 name = "note-auto"
-version = "0.5.1"
+version = "0.7.1"
 edition = "2021"
 description = "note記事トレンドドリブン自動生成システム"
 
