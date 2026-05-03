@@ -21,16 +21,24 @@ use serde_json::json;
 use crate::config::Config;
 use crate::trends::TrendItem;
 
-const ENDPOINT: &str = "https://api.x.ai/v1/responses";
-/// Responses API + tools (x_search) は grok-4 系で安定動作する。
-/// grok-3-latest は tools 互換だが返答品質が低いため、ここでは固定で grok-4 を使う。
-const MODEL: &str = "grok-4-latest";
+const RESPONSES_ENDPOINT: &str = "https://api.x.ai/v1/responses";
+const CHAT_ENDPOINT: &str = "https://api.x.ai/v1/chat/completions";
+/// Responses API + tools (x_search) のモデル候補。
+/// **server-side tools (x_search) は grok-4 family のみサポート**
+/// (grok-3-latest は HTTP 400 で拒否されるので候補から除外)。
+/// 候補が全部失敗したら chat/completions API + Grok 学習知識フォールバックへ。
+const MODEL_CANDIDATES: &[&str] = &["grok-4-latest"];
+/// 各モデルでのリトライ回数 (initial + retry)。
+/// x_search はキャパ不足時にハングしがちなので、長く待たずに即フォールバック。
+const PER_MODEL_RETRIES: usize = 2;
+/// 1 リクエストあたりの総タイムアウト (秒)。x_search は重いが、ハング時の待機を抑える。
+const PER_REQUEST_TIMEOUT_SECS: u64 = 75;
 
 /// xAI 用ローカルクライアント。HTTP/1.1 強制で安定化。
 fn xai_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent("note-auto/0.7 (xai)")
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(PER_REQUEST_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(15))
         .http1_only()
         .gzip(true)
@@ -102,49 +110,16 @@ pub async fn fetch(_shared: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendI
 合計 {top_n} 件、先頭 {viral_n} 件は必ず viral=true (現時刻バズ TOP) にしてください。"
     );
 
-    // Responses API は input にプロンプトを渡し、tools で外部検索を有効化する
-    let body = json!({
-        "model": MODEL,
-        "input": prompt,
-        "tools": [{ "type": "x_search" }],
-    });
-
-    let mut last_err: Option<anyhow::Error> = None;
-    let resp = {
-        let mut got = None;
-        for attempt in 0..3 {
-            match client
-                .post(ENDPOINT)
-                .bearer_auth(api_key)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => { got = Some(r); break; }
-                Err(e) => {
-                    let detail = err_chain(&e);
-                    tracing::warn!(attempt, error = %detail, "xAI request failed, retrying");
-                    last_err = Some(anyhow!("xAI send error (attempt {}): {}", attempt + 1, detail));
-                    tokio::time::sleep(std::time::Duration::from_millis(800 * (attempt as u64 + 1))).await;
-                }
-            }
+    // モデル候補をループしてリクエストし、503 (capacity) は次のモデルへフェイルオーバー。
+    // 各モデルで送信エラーは 3 回までリトライ。
+    let text = match call_responses_api(&client, api_key, &prompt).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "Responses API 全候補失敗 — chat/completions フォールバックへ");
+            // 最終フォールバック: 旧 chat/completions API + Grok 知識ベース (実時間性は低いが取れることが多い)
+            call_chat_fallback(&client, api_key, &prompt).await?
         }
-        got.ok_or_else(|| last_err.unwrap_or_else(|| anyhow!("xAI all retries failed")))?
     };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let txt = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Grok Responses API {}: {}", status, txt));
-    }
-
-    let raw: serde_json::Value = resp.json().await?;
-    let text = extract_text(&raw).ok_or_else(|| {
-        anyhow!(
-            "Grok response: text フィールドが見つからない。head: {:?}",
-            raw.to_string().chars().take(300).collect::<String>()
-        )
-    })?;
     let cleaned = strip_code_fence(&text);
 
     #[derive(Deserialize)]
@@ -202,6 +177,117 @@ pub async fn fetch(_shared: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendI
         .collect();
 
     Ok(items)
+}
+
+/// Responses API + tools:[{type:x_search}] を MODEL_CANDIDATES の順で呼び、
+/// 最初に 200 を返したモデルの本文を返す。送信エラーは各モデル 3 回までリトライ。
+/// 503 (capacity) や 429 (rate limit) は次のモデルへフェイルオーバー。
+async fn call_responses_api(
+    client: &reqwest::Client,
+    api_key: &str,
+    prompt: &str,
+) -> Result<String> {
+    let mut all_errs: Vec<String> = Vec::new();
+    for model in MODEL_CANDIDATES {
+        let body = json!({
+            "model": model,
+            "input": prompt,
+            "tools": [{ "type": "x_search" }],
+        });
+        let mut send_err: Option<String> = None;
+        for attempt in 0..PER_MODEL_RETRIES {
+            match client
+                .post(RESPONSES_ENDPOINT)
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    let status = r.status();
+                    if status.is_success() {
+                        let raw: serde_json::Value = match r.json().await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                all_errs.push(format!("{model}: json parse: {e}"));
+                                break;
+                            }
+                        };
+                        if let Some(t) = extract_text(&raw) {
+                            tracing::info!(model = model, "x/Grok: Responses API OK");
+                            return Ok(t);
+                        }
+                        all_errs.push(format!(
+                            "{model}: text 抽出失敗 head={:?}",
+                            raw.to_string().chars().take(200).collect::<String>()
+                        ));
+                        break;
+                    }
+                    let txt = r.text().await.unwrap_or_default();
+                    let msg = format!("{model}: HTTP {} {}", status.as_u16(), txt.chars().take(200).collect::<String>());
+                    tracing::warn!(model = model, status = %status, "Responses API non-2xx");
+                    // 503/429 は次のモデルへ。それ以外 (4xx) もモデル切り替えの価値はあるので break。
+                    all_errs.push(msg);
+                    break;
+                }
+                Err(e) => {
+                    let detail = err_chain(&e);
+                    tracing::warn!(model = model, attempt, error = %detail, "Responses API send err, retry");
+                    send_err = Some(format!("{model}: send err {} ({})", attempt + 1, detail));
+                    tokio::time::sleep(std::time::Duration::from_millis(800 * (attempt as u64 + 1))).await;
+                }
+            }
+        }
+        if let Some(e) = send_err {
+            all_errs.push(e);
+        }
+    }
+    Err(anyhow!(
+        "Responses API 全候補失敗: {}",
+        all_errs.join(" | ")
+    ))
+}
+
+/// 最終フォールバック: 旧 /v1/chat/completions API を Grok の学習知識のみで叩く。
+/// x_search なしなので実時間性は劣るが、503 でも応答が返ることが多い。
+async fn call_chat_fallback(
+    client: &reqwest::Client,
+    api_key: &str,
+    user_prompt: &str,
+) -> Result<String> {
+    let body = json!({
+        "model": "grok-3-latest",
+        "stream": false,
+        "temperature": 0.4,
+        "messages": [
+            {"role": "system", "content": "出力は厳密に JSON 配列のみ。前後に説明文を入れない。\
+あなたは X と web に関する最新知識を持つアナリスト。x_search ツールが使えないため、\
+学習データの範囲内で『最近バズりそうなトピック』を推測で構わないので返してください。"},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+    let resp = client
+        .post(CHAT_ENDPOINT)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("chat fallback send err: {}", err_chain(&e)))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("chat fallback {}: {}", status, txt.chars().take(300).collect::<String>()));
+    }
+    let v: serde_json::Value = resp.json().await?;
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow!("chat fallback: choices[0].message.content 不在"))?;
+    tracing::info!("x/Grok: chat fallback OK");
+    Ok(content.to_string())
 }
 
 /// xAI Responses API のレスポンスから本文テキストを取り出す。
