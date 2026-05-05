@@ -48,17 +48,26 @@ sha1 = "0.10"
 rand = "0.8"
 urlencoding = "2"
 
-# UI/CLI 表示系（PR-B 担当 ui-macos と共有 — ここでまとめて declare）
+# UI/CLI 表示系（v0.7.7 で wire-up 完了 — owo-colors/console/supports-color/comfy-table/indicatif）
 indicatif = "0.17"
 console = "0.15"
 owo-colors = "4"
 comfy-table = "7"
 supports-color = "3"
 
+# v0.8.0 W7 ratatui TUI: opt-in feature (--features tui で有効化)。
+# crossterm は indicatif 経由で transitively 既収録のため新規追加不要。
+ratatui = { version = "0.28", optional = true }
+
 # Windows 上で HeapAlloc より高速。fetch_all 8 ソース並列 + scoring の HashMap/HashSet
 # String allocation 集中に対し 5〜15% 改善見込み。
 [target.'cfg(windows)'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
+
+[features]
+default = []
+# `cargo build --features tui` で有効化。`note-auto tui` サブコマンドが利用可能になる。
+tui = ["dep:ratatui"]
 
 [profile.release]
 opt-level = 3

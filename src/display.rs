@@ -360,18 +360,35 @@ impl Stage {
     }
 }
 
-/// indicatif::MultiProgress 経由のパイプライン進捗オーケストレータ。
+/// パイプライン進捗の出力先抽象化 (W7-A)。
+///
+/// `IndicatifBackend` (現行 v0.7.7 互換、stderr に MultiProgress) と
+/// 将来追加予定の `TuiBackend` (W7-B、ratatui Frame に mpsc 経由 push) を切替可能にする。
+/// `PipelineProgress` は薄い facade として trait オブジェクトを保持し、
+/// 既存呼出 (main.rs / daemon.rs / writer.rs) からは backend を意識せず使える。
+pub trait PipelineBackend: Send + Sync {
+    /// ステージ開始: spinner / 進捗開始
+    fn stage_start(&self, stage: Stage, msg: &str);
+    /// ステージ完了
+    fn stage_done(&self, stage: Stage, msg: &str);
+    /// ステージ失敗
+    fn stage_fail(&self, stage: Stage, err: &str);
+    /// 全 stage 終了処理 (Drop 時にも自動)
+    fn finish(&self);
+}
+
+/// indicatif::MultiProgress 経由のパイプライン進捗 backend (v0.7.7 互換)。
 ///
 /// 5 stage (fetch / score / write / publish / notify) の状態遷移を
 /// MultiProgress + ProgressBar (Spinner) で可視化。
 /// 非 TTY 時は DrawTarget::hidden で完全静音、CI/redirect 出力にゴミを残さない。
-pub struct PipelineProgress {
+pub struct IndicatifBackend {
     multi: indicatif::MultiProgress,
     bars: [indicatif::ProgressBar; 5],
     theme: Theme,
 }
 
-impl PipelineProgress {
+impl IndicatifBackend {
     pub fn new(theme: Theme) -> Self {
         use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
@@ -395,7 +412,6 @@ impl PipelineProgress {
         let make_bar = |label: &str| -> ProgressBar {
             let pb = multi.add(ProgressBar::new_spinner());
             pb.set_style(style.clone());
-            // 起動時 prefix: "● <label>"
             pb.set_prefix(format!("{} {}", accent(&theme, g.bullet), label));
             pb
         };
@@ -410,16 +426,16 @@ impl PipelineProgress {
 
         Self { multi, bars, theme }
     }
+}
 
-    /// ステージ開始: spinner を開始し message を設定
-    pub fn stage_start(&self, stage: Stage, msg: &str) {
+impl PipelineBackend for IndicatifBackend {
+    fn stage_start(&self, stage: Stage, msg: &str) {
         let bar = &self.bars[stage as usize];
         bar.enable_steady_tick(std::time::Duration::from_millis(80));
         bar.set_message(msg.to_string());
     }
 
-    /// ステージ完了: prefix を ✓ に切替、spinner を停止
-    pub fn stage_done(&self, stage: Stage, msg: &str) {
+    fn stage_done(&self, stage: Stage, msg: &str) {
         let g = glyphs(&self.theme);
         let bar = &self.bars[stage as usize];
         bar.set_prefix(format!("{} {}", success(&self.theme, g.check), stage.label()));
@@ -427,8 +443,7 @@ impl PipelineProgress {
         bar.finish_with_message(msg.to_string());
     }
 
-    /// ステージ失敗: prefix を ✗ に切替、abandon
-    pub fn stage_fail(&self, stage: Stage, err: &str) {
+    fn stage_fail(&self, stage: Stage, err: &str) {
         let g = glyphs(&self.theme);
         let bar = &self.bars[stage as usize];
         bar.set_prefix(format!("{} {}", error_color(&self.theme, g.cross), stage.label()));
@@ -436,14 +451,53 @@ impl PipelineProgress {
         bar.abandon_with_message(format!("failed: {err}"));
     }
 
-    /// 全 stage 終了処理 (drop 時にも自動だが明示呼び出し用)
-    pub fn finish(&self) {
+    fn finish(&self) {
         for bar in &self.bars {
             if !bar.is_finished() {
                 bar.finish();
             }
         }
         let _ = self.multi.clear();
+    }
+}
+
+/// パイプライン進捗 facade。`IndicatifBackend` (default) または将来の `TuiBackend` を保持。
+///
+/// 既存呼出 (`main.rs` / `daemon.rs`) からは `new(theme)` / `stage_start` / `stage_done` /
+/// `stage_fail` / `finish` のシグネチャ無変更で動く (v0.7.7 互換)。
+pub struct PipelineProgress {
+    backend: Box<dyn PipelineBackend>,
+}
+
+impl PipelineProgress {
+    /// v0.7.7 互換: `IndicatifBackend` を使うコンストラクタ。
+    /// (内部は `new_indicatif` への alias)
+    pub fn new(theme: Theme) -> Self {
+        Self::new_indicatif(theme)
+    }
+
+    /// 明示的に indicatif backend を指定 (現状 v0.7.7 と同等動作)。
+    pub fn new_indicatif(theme: Theme) -> Self {
+        Self { backend: Box::new(IndicatifBackend::new(theme)) }
+    }
+
+    // W7-B で追加予定: pub fn new_tui(tx: tokio::sync::mpsc::Sender<PipelineUpdate>, theme: Theme) -> Self
+    // 内部で TuiBackend を生成し、stage_start/done/fail を mpsc::Sender に push する。
+
+    pub fn stage_start(&self, stage: Stage, msg: &str) {
+        self.backend.stage_start(stage, msg);
+    }
+
+    pub fn stage_done(&self, stage: Stage, msg: &str) {
+        self.backend.stage_done(stage, msg);
+    }
+
+    pub fn stage_fail(&self, stage: Stage, err: &str) {
+        self.backend.stage_fail(stage, err);
+    }
+
+    pub fn finish(&self) {
+        self.backend.finish();
     }
 }
 
