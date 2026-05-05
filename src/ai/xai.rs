@@ -7,6 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::client::AiClient;
+
 use super::{date_policy_block, strip_code_fence, today_jst_label, ResearchResult};
 use crate::scoring::SelectedTrend;
 
@@ -16,6 +18,19 @@ pub struct GrokClient<'a> {
     http: &'a reqwest::Client,
     api_key: String,
     model: String,
+}
+
+impl AiClient for GrokClient<'_> {
+    fn label(&self) -> &'static str {
+        "xai_grok"
+    }
+
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        self.http
+            .post(ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .json(body)
+    }
 }
 
 impl<'a> GrokClient<'a> {
@@ -72,23 +87,6 @@ impl<'a> GrokClient<'a> {
             ]
         });
 
-        // M2: transient (429/502/503) と connect/timeout を 3 回まで指数バックオフで retry
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(ENDPOINT)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send(),
-            3,
-            "xai_grok",
-        ).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Grok API {}: {}", status, txt));
-        }
-
         #[derive(Deserialize)]
         struct Chat { choices: Vec<Choice>, #[serde(default)] citations: Vec<String> }
         #[derive(Deserialize)]
@@ -96,7 +94,8 @@ impl<'a> GrokClient<'a> {
         #[derive(Deserialize)]
         struct Msg { content: String }
 
-        let parsed: Chat = resp.json().await?;
+        // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
+        let parsed: Chat = super::client::send_json(self, &body).await?;
         let content = parsed.choices.first()
             .ok_or_else(|| anyhow!("empty grok choices"))?
             .message.content.clone();

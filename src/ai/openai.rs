@@ -7,6 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::client::AiClient;
 use super::ImageAsset;
 
 const ENDPOINT: &str = "https://api.openai.com/v1/images/generations";
@@ -16,6 +17,19 @@ pub struct OpenAiImageClient<'a> {
     api_key: String,
     model: String,
     size: String,
+}
+
+impl AiClient for OpenAiImageClient<'_> {
+    fn label(&self) -> &'static str {
+        "openai_image"
+    }
+
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        self.http
+            .post(ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .json(body)
+    }
 }
 
 impl<'a> OpenAiImageClient<'a> {
@@ -37,25 +51,6 @@ impl<'a> OpenAiImageClient<'a> {
             "n": 1,
         });
 
-        // M2: transient (HTTP 408/425/429/500/502/503/504) と connect/timeout を
-        //     3 回まで指数バックオフで retry。anthropic/xai/gemini/nvidia/pollo と同パターン。
-        //     v0.8.0 baseline で他 5 client は適用済 (4ba4ddb 経路)、本 PR で openai 補完。
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(ENDPOINT)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send(),
-            3,
-            "openai_image",
-        ).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("OpenAI Images {}: {}", status, txt));
-        }
-
         #[derive(Deserialize)]
         struct Resp { data: Vec<ImgData> }
         #[derive(Deserialize)]
@@ -66,7 +61,8 @@ impl<'a> OpenAiImageClient<'a> {
             url: Option<String>,
         }
 
-        let parsed: Resp = resp.json().await?;
+        // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
+        let parsed: Resp = super::client::send_json(self, &body).await?;
         let first = parsed.data.into_iter().next().ok_or_else(|| anyhow!("empty image data"))?;
 
         let bytes = if let Some(b64) = first.b64_json {

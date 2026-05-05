@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
+use super::client::AiClient;
 use super::ImageAsset;
 
 const BASE: &str = "https://pollo.ai/api/platform";
@@ -20,6 +21,24 @@ pub struct PolloClient<'a> {
     model_name: String,
     aspect_ratio: String,
     quality: String,
+}
+
+impl AiClient for PolloClient<'_> {
+    fn label(&self) -> &'static str {
+        "pollo_submit"
+    }
+
+    /// AF2: submit (text2image POST) のみ trait 化。
+    /// polling (GET /generation/{id}) は別フロー (poll_until_done) で別途処理し、
+    /// quality H1 (polling unretried) は別 PR で対応予定 (本 AF2 のスコープ外)。
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        let submit_url = format!("{BASE}/generation/text2image");
+        self.http
+            .post(submit_url)
+            .header("x-api-key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(body)
+    }
 }
 
 impl<'a> PolloClient<'a> {
@@ -51,30 +70,14 @@ impl<'a> PolloClient<'a> {
             }
         });
 
-        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
-        let submit_url = format!("{BASE}/generation/text2image");
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(&submit_url)
-                .header("x-api-key", &self.api_key)
-                .header("Content-Type", "application/json")
-                .json(&submit)
-                .send(),
-            3,
-            "pollo_submit",
-        ).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Pollo submit {}: {}", status, txt));
-        }
-
         #[derive(Deserialize)]
         struct SubmitResp { data: TaskRef }
         #[derive(Deserialize)]
         struct TaskRef { id: u64, #[allow(dead_code)] status: String }
 
-        let submit_resp: SubmitResp = resp.json().await.context("parse submit response")?;
+        // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
+        let submit_resp: SubmitResp = super::client::send_json(self, &submit).await
+            .context("Pollo submit failed")?;
         let task_id = submit_resp.data.id;
         tracing::info!(task_id, model = %self.model_name, quality = %self.quality, "pollo task submitted");
 
