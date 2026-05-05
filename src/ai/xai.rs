@@ -118,6 +118,26 @@ impl<'a> GrokClient<'a> {
             }
         }
 
+        // M3: citations が空の場合、トレンドソースの URL で fallback 補完
+        //
+        // 背景: 2026-04 に xAI の search_parameters が deprecated (410 Gone) になり、
+        // Agent Tools API (x_search) は別経路 (trends::x_grok) で利用しているが、
+        // 本 ai::xai 経由の writer 用 research では Grok のモデル内知識のみ参照する形に
+        // フォールバックしている。結果として citations が空のまま返るケースが多発し、
+        // note 記事末尾の出典セクションが空欄になり SEO 信頼性が低下する。
+        //
+        // 対策: 最低 1 件はトレンド URL (X 投稿 / Google News 記事 / RSS フィード等) を
+        // 出典として記録する。Agent Tools API への完全移行 (本格化) は別タスク。
+        if result.citations.is_empty() {
+            if let Some(url) = trend.item.url.as_ref() {
+                result.citations.push(url.clone());
+                tracing::debug!(
+                    title = %trend.item.title, url,
+                    "citations empty, fallback to trend.item.url"
+                );
+            }
+        }
+
         Ok(result)
     }
 
