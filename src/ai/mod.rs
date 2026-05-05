@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
+pub mod client;
 pub mod gemini;
 pub mod nvidia;
 pub mod openai;
