@@ -481,8 +481,13 @@ impl PipelineProgress {
         Self { backend: Box::new(IndicatifBackend::new(theme)) }
     }
 
-    // W7-B で追加予定: pub fn new_tui(tx: tokio::sync::mpsc::Sender<PipelineUpdate>, theme: Theme) -> Self
-    // 内部で TuiBackend を生成し、stage_start/done/fail を mpsc::Sender に push する。
+    /// W7-B: TuiBackend を使うコンストラクタ。`cli::tui` から渡される
+    /// `tokio::sync::mpsc::UnboundedSender<PipelineUpdate>` 経由で進捗を ratatui App に push する。
+    /// `--features tui` 時のみ利用可能。
+    #[cfg(feature = "tui")]
+    pub fn new_tui(tx: tokio::sync::mpsc::UnboundedSender<PipelineUpdate>) -> Self {
+        Self { backend: Box::new(TuiBackend { tx }) }
+    }
 
     pub fn stage_start(&self, stage: Stage, msg: &str) {
         self.backend.stage_start(stage, msg);
@@ -504,6 +509,54 @@ impl PipelineProgress {
 impl Drop for PipelineProgress {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TUI backend (W7-B, --features tui only)
+//
+// `cli::tui` モジュールが ratatui App を所有し、`PipelineProgress::new_tui(tx)` 経由で
+// 起動した worker タスクから stage_start/done/fail を mpsc::UnboundedSender に push する。
+// App 側は `UnboundedReceiver<PipelineUpdate>` を select! で受信して state を更新、
+// ratatui Frame を再描画する。
+
+/// パイプライン進捗イベント (TUI backend が mpsc 経由で送信)。
+#[cfg(feature = "tui")]
+#[derive(Clone, Debug)]
+pub enum PipelineUpdate {
+    StageStart { stage: Stage, msg: String },
+    StageDone { stage: Stage, msg: String },
+    StageFail { stage: Stage, err: String },
+    Finished,
+}
+
+#[cfg(feature = "tui")]
+struct TuiBackend {
+    tx: tokio::sync::mpsc::UnboundedSender<PipelineUpdate>,
+}
+
+#[cfg(feature = "tui")]
+impl PipelineBackend for TuiBackend {
+    fn stage_start(&self, stage: Stage, msg: &str) {
+        let _ = self.tx.send(PipelineUpdate::StageStart {
+            stage,
+            msg: msg.to_string(),
+        });
+    }
+    fn stage_done(&self, stage: Stage, msg: &str) {
+        let _ = self.tx.send(PipelineUpdate::StageDone {
+            stage,
+            msg: msg.to_string(),
+        });
+    }
+    fn stage_fail(&self, stage: Stage, err: &str) {
+        let _ = self.tx.send(PipelineUpdate::StageFail {
+            stage,
+            err: err.to_string(),
+        });
+    }
+    fn finish(&self) {
+        let _ = self.tx.send(PipelineUpdate::Finished);
     }
 }
 
