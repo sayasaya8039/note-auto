@@ -137,5 +137,6 @@ fn decode_b64_or_data_url(s: &str) -> Result<Vec<u8>> {
 }
 
 async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    Ok(http.get(url).send().await?.error_for_status()?.bytes().await?.to_vec())
+    // M2: bare .send().await? を crate::util::fetch_bytes_with_retry で置換
+    crate::util::fetch_bytes_with_retry(http, url, "nvidia_image_dl").await
 }

@@ -68,7 +68,8 @@ impl<'a> OpenAiImageClient<'a> {
         let bytes = if let Some(b64) = first.b64_json {
             STANDARD.decode(b64).context("b64 decode")?
         } else if let Some(u) = first.url {
-            self.http.get(&u).send().await?.error_for_status()?.bytes().await?.to_vec()
+            // M2: bare .send().await? を crate::util::fetch_bytes_with_retry で置換
+            crate::util::fetch_bytes_with_retry(self.http, &u, "openai_image_dl").await?
         } else {
             return Err(anyhow!("image response had neither b64_json nor url"));
         };
