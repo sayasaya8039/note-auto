@@ -51,13 +51,18 @@ impl<'a> PolloClient<'a> {
             }
         });
 
-        let resp = self.http
-            .post(format!("{BASE}/generation/text2image"))
-            .header("x-api-key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&submit)
-            .send()
-            .await?;
+        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
+        let submit_url = format!("{BASE}/generation/text2image");
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(&submit_url)
+                .header("x-api-key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .json(&submit)
+                .send(),
+            3,
+            "pollo_submit",
+        ).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();

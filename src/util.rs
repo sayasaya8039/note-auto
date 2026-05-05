@@ -97,6 +97,76 @@ pub fn http_client_long() -> anyhow::Result<reqwest::Client> {
     Ok(HTTP_CLIENT_LONG.clone())
 }
 
+/// transient HTTP エラー (408/425/429/500/502/503/504) と connect/timeout エラーに対し
+/// 指数バックオフ + jitter でリトライする汎用ヘルパ (M2)。
+///
+/// - `factory`: `RequestBuilder::send()` 相当を返す Fn（毎試行で新規作成）
+/// - `max_retries`: 失敗時の追加試行回数 (全試行 = max_retries + 1)
+/// - 永続エラー (4xx の他、5xx の中で transient 以外) は即座に Response を返す
+///   → caller 側が `status().is_success()` で判定して err 化する流れを踏襲
+/// - 全リトライ失敗時は最後の Response (or Err) を返す
+///
+/// バックオフ: 500ms × 2^attempt + jitter (0..base/4)、最大 30s
+///
+/// Anthropic / Grok / Gemini / Nvidia / Pollo / OpenAI 全 AI client から呼ぶ想定。
+pub async fn send_with_retry<F, Fut>(
+    factory: F,
+    max_retries: usize,
+    label: &str,
+) -> std::result::Result<reqwest::Response, reqwest::Error>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+{
+    let mut attempt: usize = 0;
+    loop {
+        let result = factory().await;
+        match result {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                let transient = matches!(code, 408 | 425 | 429 | 500 | 502 | 503 | 504);
+                if transient && attempt < max_retries {
+                    let delay = backoff_ms(attempt);
+                    tracing::warn!(
+                        label, attempt = attempt + 1, max = max_retries + 1,
+                        status = code, delay_ms = delay,
+                        "transient HTTP error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                let recoverable = e.is_connect() || e.is_timeout();
+                if recoverable && attempt < max_retries {
+                    let delay = backoff_ms(attempt);
+                    tracing::warn!(
+                        label, attempt = attempt + 1, max = max_retries + 1,
+                        error = %e, delay_ms = delay,
+                        "connect/timeout error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// 指数バックオフ + jitter (1/4 of base) ms。最大 30s で頭打ち。
+fn backoff_ms(attempt: usize) -> u64 {
+    use rand::Rng;
+    let base = 500u64.saturating_mul(1u64 << attempt.min(6));
+    let base = base.min(30_000);
+    let jitter_max = (base / 4).max(1);
+    let jitter = rand::thread_rng().gen_range(0..jitter_max);
+    base.saturating_add(jitter)
+}
+
 /// YAML 値のエスケープ (インジェクション防止)
 pub fn yaml_escape(s: &str) -> String {
     s.replace('\\', "\\\\")

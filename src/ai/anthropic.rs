@@ -221,14 +221,18 @@ https://note.com/alvis8039/message
             ]
         });
 
-        let resp = self.http
-            .post(ENDPOINT)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        // M2: transient (429/502/503 等) と connect/timeout を 3 回まで指数バックオフで retry
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(ENDPOINT)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send(),
+            3,
+            "anthropic",
+        ).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

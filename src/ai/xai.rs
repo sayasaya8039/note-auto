@@ -72,12 +72,16 @@ impl<'a> GrokClient<'a> {
             ]
         });
 
-        let resp = self.http
-            .post(ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
+        // M2: transient (429/502/503) と connect/timeout を 3 回まで指数バックオフで retry
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(ENDPOINT)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send(),
+            3,
+            "xai_grok",
+        ).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

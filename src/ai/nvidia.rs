@@ -50,14 +50,18 @@ impl<'a> NvidiaFluxClient<'a> {
             "steps": self.steps,
         });
 
-        let resp = self.http
-            .post(ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(ENDPOINT)
+                .bearer_auth(&self.api_key)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send(),
+            3,
+            "nvidia_flux",
+        ).await?;
 
         let status = resp.status();
         if !status.is_success() {

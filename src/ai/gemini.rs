@@ -78,13 +78,17 @@ impl<'a> GeminiImageClient<'a> {
             }
         });
 
-        let resp = self.http
-            .post(&endpoint)
-            .header("x-goog-api-key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(&endpoint)
+                .header("x-goog-api-key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send(),
+            3,
+            "gemini_image",
+        ).await?;
 
         let status = resp.status();
         if !status.is_success() {
