@@ -1,6 +1,6 @@
 [package]
 name = "note-auto"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 description = "note記事トレンドドリブン自動生成システム"
 
@@ -9,7 +9,17 @@ name = "note-auto"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+# tokio: full → 必要 features のみに絞る (依存ビルド時間削減)
+# - rt-multi-thread: #[tokio::main] / tokio_cron_scheduler
+# - macros: tokio::main, tokio::join!
+# - signal: tokio::signal::ctrl_c
+# - time: tokio::time::timeout
+# - net + io-util: reqwest / tokio::io::AsyncWriteExt
+# - sync: scheduler 内部
+# - process: tokio::process::Command (sidecar / publish::note)
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread", "macros", "signal", "time", "net", "io-util", "sync", "process"
+] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,7 +32,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 url = "2"
 regex = "1"
-quick-xml = { version = "0.36", features = ["serialize"] }
+# quick-xml: rss / atom_syndication 経由で利用（直接呼び出し 0 件のため直接依存削除）
 rss = "2"
 atom_syndication = "0.12"
 html-escape = "0.2"
@@ -38,8 +48,22 @@ sha1 = "0.10"
 rand = "0.8"
 urlencoding = "2"
 
+# UI/CLI 表示系（PR-B 担当 ui-macos と共有 — ここでまとめて declare）
+indicatif = "0.17"
+console = "0.15"
+owo-colors = "4"
+comfy-table = "7"
+supports-color = "3"
+
+# Windows 上で HeapAlloc より高速。fetch_all 8 ソース並列 + scoring の HashMap/HashSet
+# String allocation 集中に対し 5〜15% 改善見込み。
+[target.'cfg(windows)'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"            # thin → fat: クロスクレート inlining を最大化
 codegen-units = 1
 strip = true
+panic = "abort"        # unwinding テーブル削除 (daemon panic は match で捕捉済)
+incremental = false    # release ビルドのキャッシュは sccache / zigbuild 任せ

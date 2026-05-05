@@ -61,22 +61,40 @@ fn bigrams(s: &str) -> HashSet<String> {
     gs.windows(2).map(|w| w.concat()).collect()
 }
 
-/// 共通 HTTP クライアント (Result 返却)
-pub fn http_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+/// 共通 HTTP クライアント (プロセス全体で 1 インスタンス共有)
+///
+/// `OnceLock` でプロセス起動時に 1 度だけビルドし、以降は `clone()` で参照を返す。
+/// reqwest::Client の clone は内部 Arc なので低コスト。
+/// 失敗時 (TLS 初期化エラー等) は `expect` で fail-fast。プロセス起動直後しか呼ばれない。
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
         .user_agent("note-auto/0.1 (+https://note.com)")
         .timeout(std::time::Duration::from_secs(30))
         .gzip(true)
-        .build()?)
-}
+        .build()
+        .expect("failed to build shared http client")
+});
 
-/// AI 用 HTTP クライアント (タイムアウト長め、Result 返却)
-pub fn http_client_long() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+static HTTP_CLIENT_LONG: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
         .user_agent("note-auto/0.2")
         .timeout(std::time::Duration::from_secs(180))
         .gzip(true)
-        .build()?)
+        .build()
+        .expect("failed to build shared http_client_long")
+});
+
+/// 共通 HTTP クライアント (Result 返却 — 旧 API 互換)
+///
+/// 内部は `OnceLock` 経由で初回のみビルド、以降は clone を返す。
+/// 各呼び出し側のコード変更は不要。
+pub fn http_client() -> anyhow::Result<reqwest::Client> {
+    Ok(HTTP_CLIENT.clone())
+}
+
+/// AI 用 HTTP クライアント (タイムアウト長め、Result 返却 — 旧 API 互換)
+pub fn http_client_long() -> anyhow::Result<reqwest::Client> {
+    Ok(HTTP_CLIENT_LONG.clone())
 }
 
 /// YAML 値のエスケープ (インジェクション防止)
