@@ -9,7 +9,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::config::Config;
 use crate::history::{History, HistoryEntry};
-use crate::publish::{publish_all, notify_summary, slack, PublishResult, RunSummary};
+use crate::publish::{publish_all, notify_summary, post_progress, PublishResult, RunSummary};
 use crate::scoring::{select_top, SelectedTrend};
 use crate::trends::fetch_all;
 use crate::writer;
@@ -82,7 +82,7 @@ pub async fn execute_cycle_with_progress(
     // Stage 1: 起動通知
     let source_list = cfg.trends.sources.join(", ");
     let source_count = cfg.trends.sources.len();
-    slack::post_progress(cfg, &format!(
+    post_progress(cfg, &format!(
         "🚀 *note-auto 起動* ({today} {hhmm})\nトレンド収集開始 ({source_count} ソース並列: {source_list})"
     )).await;
 
@@ -93,7 +93,7 @@ pub async fn execute_cycle_with_progress(
         Ok(v) => v,
         Err(e) => {
             progress.stage_fail(crate::display::Stage::Fetch, &e.to_string());
-            slack::post_progress(cfg, &format!(
+            post_progress(cfg, &format!(
                 "❌ *fetch 失敗* ({source_list})\n```{e}```"
             )).await;
             return Err(e);
@@ -101,14 +101,15 @@ pub async fn execute_cycle_with_progress(
     };
     progress.stage_done(crate::display::Stage::Fetch, &format!("{} 件取得", items.len()));
     if items.is_empty() {
-        slack::post_progress(cfg, &format!(
+        post_progress(cfg, &format!(
             "⚠️ *トレンド0件* — 全ソース ({source_list}) から取得失敗または該当なし。直近のログを確認してください。"
         )).await;
     }
 
     // 履歴読み込み、重複を弾くため top を多めに選定
     progress.stage_start(crate::display::Stage::Score, "スコアリング + 履歴重複除去中…");
-    let history = History::load(None).unwrap_or_default();
+    // M1: 1 度だけ load し、dedup チェックと append の両方に同一インスタンスを使う
+    let mut history = History::load(None).unwrap_or_default();
     let top = cfg.schedule.daily_top;
     let pre = select_top(items, top * 4, &cfg.scoring);
     let mut selected: Vec<SelectedTrend> = Vec::new();
@@ -128,7 +129,7 @@ pub async fn execute_cycle_with_progress(
     if selected.is_empty() {
         progress.stage_fail(crate::display::Stage::Score,
             &format!("新鮮トレンド 0 件 (重複スキップ {})", skipped_dup));
-        slack::post_progress(cfg, &format!(
+        post_progress(cfg, &format!(
             "⚠️ *新鮮トレンド 0 件* (重複スキップ {skipped_dup})\n履歴と重複しない候補が無いか、fetch が全失敗しています。"
         )).await;
         return Err(anyhow::anyhow!("no fresh trends after history dedup (all candidates duplicate)"));
@@ -144,7 +145,7 @@ pub async fn execute_cycle_with_progress(
         .map(|(i, s)| format!("{}. {}", i + 1, s.item.title.chars().take(50).collect::<String>()))
         .collect::<Vec<_>>()
         .join("\n");
-    slack::post_progress(cfg, &format!(
+    post_progress(cfg, &format!(
         "🔍 *{} 件選定完了* → 記事執筆開始 (推定 5-10 分/記事)\n{}",
         selected.len(), title_list
     )).await;
@@ -158,7 +159,7 @@ pub async fn execute_cycle_with_progress(
         &format!("{} 記事 / {} 字", articles.len(), total_chars));
 
     // Stage 3: 執筆完了通知
-    slack::post_progress(cfg, &format!(
+    post_progress(cfg, &format!(
         "✍️ *{} 記事執筆完了* (合計 {}字 / 画像 {} 枚)\nnote 投稿開始 (1〜2 分/記事)",
         articles.len(), total_chars,
         articles.iter().map(|a| 1 + a.inline_image_paths.len()).sum::<usize>()
@@ -173,21 +174,20 @@ pub async fn execute_cycle_with_progress(
 
     // 履歴に追記 (note に投稿成功したもののみ=重複再生成を完全に防ぐ)
     // ただし draft でも追記 (下書きでも一度生成したら再生成したくない)
-    {
-        let mut hist = History::load(None).unwrap_or_default();
-        for (article, result) in articles.iter().zip(publish_results.iter()) {
-            if result.note_status == "published" || result.note_status == "draft" {
-                let entry = HistoryEntry {
-                    slug: article.slug.clone(),
-                    title: article.title.clone(),
-                    date: today.clone(),
-                    source_url: article.source_url.clone(),
-                    source: selected.iter().find(|s| s.item.title == article.title)
-                        .map(|s| s.item.source.clone()),
-                };
-                if let Err(e) = hist.append(entry) {
-                    tracing::warn!(error = %e, "history append failed");
-                }
+    // M1: 2 回目の History::load を廃止。上で load した mut history をそのまま使う。
+    //     dedup チェック → publish → append が同一インスタンスで一貫する。
+    for (article, result) in articles.iter().zip(publish_results.iter()) {
+        if result.note_status == "published" || result.note_status == "draft" {
+            let entry = HistoryEntry {
+                slug: article.slug.clone(),
+                title: article.title.clone(),
+                date: today.clone(),
+                source_url: article.source_url.clone(),
+                source: selected.iter().find(|s| s.item.title == article.title)
+                    .map(|s| s.item.source.clone()),
+            };
+            if let Err(e) = history.append(entry) {
+                tracing::warn!(error = %e, "history append failed");
             }
         }
     }

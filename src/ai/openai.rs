@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ArticleBrief, ImageAsset};
+use super::ImageAsset;
 
 const ENDPOINT: &str = "https://api.openai.com/v1/images/generations";
 
@@ -26,10 +26,6 @@ impl<'a> OpenAiImageClient<'a> {
             model: model.to_string(),
             size: size.to_string(),
         }
-    }
-
-    pub async fn generate(&self, brief: &ArticleBrief) -> Result<ImageAsset> {
-        self.generate_prompt(&build_prompt(brief)).await
     }
 
     pub async fn generate_prompt(&self, prompt: &str) -> Result<ImageAsset> {
@@ -77,17 +73,4 @@ impl<'a> OpenAiImageClient<'a> {
 
         Ok(ImageAsset { prompt, png_bytes: bytes })
     }
-}
-
-fn build_prompt(brief: &ArticleBrief) -> String {
-    format!(
-        "note記事「{}」のアイキャッチ画像。\
-カテゴリ: {}。キーワード: {}。\
-モダンでクリーンなエディトリアルイラスト調、コントラスト強め、\
-中央に抽象的メタファー、テキストや文字は一切入れない、\
-16:9 横長、上下に余白、落ち着いた色調に1色アクセント。",
-        brief.title,
-        brief.category,
-        brief.tags.join(", ")
-    )
 }
