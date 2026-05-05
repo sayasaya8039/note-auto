@@ -131,8 +131,17 @@ async fn main() -> Result<()> {
         Command::FetchTrends { out, top } => {
             let out_dir = resolve_out(out);
             std::fs::create_dir_all(&out_dir)?;
+            let progress = display::PipelineProgress::new(theme);
+
+            progress.stage_start(display::Stage::Fetch, "全ソース並列取得中…");
             let items = trends::fetch_all(&cfg).await?;
+            progress.stage_done(display::Stage::Fetch, &format!("{} 件", items.len()));
+
+            progress.stage_start(display::Stage::Score, "スコアリング中…");
             let selected = scoring::select_top(items, top, &cfg.scoring);
+            progress.stage_done(display::Stage::Score, &format!("{} 件選定", selected.len()));
+            drop(progress);
+
             let out_path = out_dir.join("trends.json");
             std::fs::write(&out_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(path = %out_path.display(), count = selected.len(), "trends.json を出力");
@@ -159,14 +168,26 @@ async fn main() -> Result<()> {
             if dry_run { cfg.writer.dry_run = true; }
             let out_dir = resolve_out(out);
             std::fs::create_dir_all(&out_dir)?;
+            let progress = display::PipelineProgress::new(theme);
+
+            progress.stage_start(display::Stage::Fetch, "全ソース並列取得中…");
             let items = trends::fetch_all(&cfg).await?;
+            progress.stage_done(display::Stage::Fetch, &format!("{} 件", items.len()));
+
+            progress.stage_start(display::Stage::Score, "スコアリング中…");
             let selected = scoring::select_top(items, top, &cfg.scoring);
+            progress.stage_done(display::Stage::Score, &format!("{} 件選定", selected.len()));
+
             let trends_path = out_dir.join("trends.json");
             std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(count = selected.len(), "trends selected");
-            display::print_scoring_table(&theme, &selected);
 
+            progress.stage_start(display::Stage::Write, "AI 執筆中…");
             let written = writer::run(&cfg, &selected, &out_dir).await?;
+            progress.stage_done(display::Stage::Write, &format!("{} 記事", written.len()));
+            drop(progress);
+
+            display::print_scoring_table(&theme, &selected);
             display::print_check(&theme, &format!("{} 記事を出力 → {}", written.len(), out_dir.display()));
             for a in &written {
                 println!("  - {} ({}文字) → {}", a.title, a.char_count, a.md_path.display());
@@ -178,8 +199,14 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("read {}", from.display()))?;
             let articles: Vec<writer::WrittenArticle> = serde_json::from_str(&txt)
                 .with_context(|| "parse articles.json")?;
+            let progress = display::PipelineProgress::new(theme);
+
+            progress.stage_start(display::Stage::Publish,
+                &format!("{} 記事を note + X へ投稿中…", articles.len()));
             let start = std::time::Instant::now();
             let results = publish::publish_all(&cfg, &articles).await?;
+            progress.stage_done(display::Stage::Publish, "完了");
+
             let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
             let summary = publish::RunSummary {
                 date: chrono::Local::now().format("%Y-%m-%d").to_string(),
@@ -187,7 +214,12 @@ async fn main() -> Result<()> {
                 total_chars,
                 duration_secs: start.elapsed().as_secs(),
             };
+
+            progress.stage_start(display::Stage::Notify, "Slack 通知送信中…");
             publish::notify_summary(&cfg, &summary).await.ok();
+            progress.stage_done(display::Stage::Notify, "送信完了");
+            drop(progress);
+
             display::print_done(&theme, &summary);
             display::print_check(&theme, &format!("publish完了: note={}/X={}/Slack=送信",
                 summary.articles.iter().filter(|a| a.note_status == "published" || a.note_status == "draft").count(),

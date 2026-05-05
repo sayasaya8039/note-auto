@@ -59,6 +59,10 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     let out_dir = PathBuf::from("drafts").join(&today);
     std::fs::create_dir_all(&out_dir)?;
 
+    // W1: indicatif MultiProgress でパイプライン全 5 stage を可視化
+    let theme = crate::display::Theme::current();
+    let progress = crate::display::PipelineProgress::new(theme);
+
     // Stage 1: 起動通知
     let source_list = cfg.trends.sources.join(", ");
     let source_count = cfg.trends.sources.len();
@@ -67,15 +71,19 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     )).await;
 
     // 1. fetch
+    progress.stage_start(crate::display::Stage::Fetch,
+        &format!("{} ソース並列取得中…", source_count));
     let items = match fetch_all(cfg).await {
         Ok(v) => v,
         Err(e) => {
+            progress.stage_fail(crate::display::Stage::Fetch, &e.to_string());
             slack::post_progress(cfg, &format!(
                 "❌ *fetch 失敗* ({source_list})\n```{e}```"
             )).await;
             return Err(e);
         }
     };
+    progress.stage_done(crate::display::Stage::Fetch, &format!("{} 件取得", items.len()));
     if items.is_empty() {
         slack::post_progress(cfg, &format!(
             "⚠️ *トレンド0件* — 全ソース ({source_list}) から取得失敗または該当なし。直近のログを確認してください。"
@@ -83,6 +91,7 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     }
 
     // 履歴読み込み、重複を弾くため top を多めに選定
+    progress.stage_start(crate::display::Stage::Score, "スコアリング + 履歴重複除去中…");
     let history = History::load(None).unwrap_or_default();
     let top = cfg.schedule.daily_top;
     let pre = select_top(items, top * 4, &cfg.scoring);
@@ -101,11 +110,15 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     }
     tracing::info!(selected = selected.len(), skipped_dup, "trends selected (dedup against history)");
     if selected.is_empty() {
+        progress.stage_fail(crate::display::Stage::Score,
+            &format!("新鮮トレンド 0 件 (重複スキップ {})", skipped_dup));
         slack::post_progress(cfg, &format!(
             "⚠️ *新鮮トレンド 0 件* (重複スキップ {skipped_dup})\n履歴と重複しない候補が無いか、fetch が全失敗しています。"
         )).await;
         return Err(anyhow::anyhow!("no fresh trends after history dedup (all candidates duplicate)"));
     }
+    progress.stage_done(crate::display::Stage::Score,
+        &format!("{} 件選定 (重複スキップ {})", selected.len(), skipped_dup));
 
     let trends_path = out_dir.join("trends.json");
     std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
@@ -121,8 +134,12 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     )).await;
 
     // 2. write
+    progress.stage_start(crate::display::Stage::Write,
+        &format!("{} 記事を AI 執筆中…", selected.len()));
     let articles = writer::run(cfg, &selected, &out_dir).await?;
     let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
+    progress.stage_done(crate::display::Stage::Write,
+        &format!("{} 記事 / {} 字", articles.len(), total_chars));
 
     // Stage 3: 執筆完了通知
     slack::post_progress(cfg, &format!(
@@ -132,8 +149,11 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     )).await;
 
     // 3. publish
+    progress.stage_start(crate::display::Stage::Publish,
+        &format!("{} 記事を note + X に投稿中…", articles.len()));
     let publish_results: Vec<PublishResult> = publish_all(cfg, &articles).await?;
     let duration_secs = start.elapsed().as_secs();
+    progress.stage_done(crate::display::Stage::Publish, "完了");
 
     // 履歴に追記 (note に投稿成功したもののみ=重複再生成を完全に防ぐ)
     // ただし draft でも追記 (下書きでも一度生成したら再生成したくない)
@@ -166,6 +186,11 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     // 実行サマリを JSON 保存
     let summary_path = out_dir.join("summary.json");
     std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)?;
+
+    // notify stage は呼び出し側 (main.rs / daemon::run_daemon) で `notify_summary` 後に
+    // `progress.stage_done(Notify, ...)` するか、明示的に終了。ここでは progress を drop で締める。
+    progress.stage_done(crate::display::Stage::Notify, "");
+    drop(progress);
 
     Ok(summary)
 }

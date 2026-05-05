@@ -16,6 +16,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use crate::display::Theme;
 
 /// 後方互換用。テーマ未指定時はデフォルト検出 (`Theme::current()`) を使う。
+/// 現状 `main.rs` は `init_with(&theme)` を直接呼ぶため未使用、外部呼び出し向けに保持。
+#[allow(dead_code)]
 pub fn init() {
     init_with(&Theme::current());
 }
