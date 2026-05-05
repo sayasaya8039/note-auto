@@ -106,6 +106,17 @@ struct App {
     theme: Theme,
     /// P4: ヘルプオーバーレイ表示中 (`?` キーでトグル)
     help_overlay: bool,
+    /// W7-F: 直近の StageFail / WorkerDone Err の詳細 (e キーで modal 展開)
+    error_detail: Option<ErrorDetail>,
+    /// W7-F: エラー詳細モーダル表示中 (`e` キーでトグル)
+    error_overlay: bool,
+}
+
+/// W7-F: エラー詳細情報 (StageFail / WorkerDone Err 時に保持)
+struct ErrorDetail {
+    stage: Option<Stage>,
+    msg: String,
+    timestamp: chrono::DateTime<chrono::Local>,
 }
 
 impl App {
@@ -145,6 +156,8 @@ impl App {
             history_recent,
             theme,
             help_overlay: false,
+            error_detail: None,
+            error_overlay: false,
         }
     }
 
@@ -211,6 +224,12 @@ impl App {
                 };
                 self.pipeline[i] = StageState::Failed(combined.clone());
                 self.push_log(format!("✗ [{}] {}", stage.label(), combined));
+                // W7-F: 最新の StageFail を error_detail に保持 (e キーで modal 展開)
+                self.error_detail = Some(ErrorDetail {
+                    stage: Some(stage),
+                    msg: err,
+                    timestamp: chrono::Local::now(),
+                });
             }
             PipelineUpdate::Finished => {
                 self.running = false;
@@ -350,6 +369,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                         Err(err) => {
                             app.last_msg = Some(format!("失敗: {err}"));
                             app.push_log(format!("✗ {}", err));
+                            // W7-F: WorkerDone Err も error_detail に保持
+                            app.error_detail = Some(ErrorDetail {
+                                stage: None,
+                                msg: err,
+                                timestamp: chrono::Local::now(),
+                            });
                         }
                     }
                 }
@@ -367,7 +392,7 @@ async fn handle_key(
 ) {
     use ratatui::crossterm::event::KeyModifiers;
 
-    // P4: ヘルプオーバーレイ表示中はほぼ全キー無効化、`?`/`Esc`/`q` のみ受け付ける
+    // P4: ヘルプオーバーレイ表示中はほぼ全キー無効化、`?`/`Esc`/`q`/`Enter` のみ受け付ける
     if app.help_overlay {
         match k.code {
             KeyCode::Char('?')
@@ -375,6 +400,20 @@ async fn handle_key(
             | KeyCode::Esc
             | KeyCode::Enter => {
                 app.help_overlay = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // W7-F: エラーオーバーレイ表示中も同様に `e`/`Esc`/`q`/`Enter` のみ受け付ける
+    if app.error_overlay {
+        match k.code {
+            KeyCode::Char('e')
+            | KeyCode::Char('q')
+            | KeyCode::Esc
+            | KeyCode::Enter => {
+                app.error_overlay = false;
             }
             _ => {}
         }
@@ -392,6 +431,14 @@ async fn handle_key(
         // P4: ? でヘルプオーバーレイ
         KeyCode::Char('?') => {
             app.help_overlay = true;
+        }
+        // W7-F: e でエラー詳細オーバーレイトグル (error_detail があれば)
+        KeyCode::Char('e') | KeyCode::Char('E') => {
+            if app.error_detail.is_some() {
+                app.error_overlay = true;
+            } else {
+                app.push_log("(エラー履歴なし — 失敗してから再度 e で詳細表示)".to_string());
+            }
         }
         KeyCode::Char('q') | KeyCode::Esc => {
             if !app.running {
@@ -532,6 +579,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::styled(" Help  ", Style::default().fg(SECONDARY)),
         Span::styled("Ctrl-L", Style::default().fg(ACCENT)),
         Span::styled(" ClearLog  ", Style::default().fg(SECONDARY)),
+        // W7-F: e Error ヒント (error_detail 有なら ERROR_C 強調、無なら dim)
+        Span::styled(
+            "e",
+            Style::default().fg(if app.error_detail.is_some() { ERROR_C } else { SECONDARY }),
+        ),
+        Span::styled(" Error  ", Style::default().fg(SECONDARY)),
         Span::styled("q", Style::default().fg(ACCENT)),
         Span::styled(" Quit", Style::default().fg(SECONDARY)),
         Span::raw("  "),
@@ -545,6 +598,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     // P4: ヘルプオーバーレイ (Toggle: `?`)
     if app.help_overlay {
         render_help_overlay(f, app);
+    }
+    // W7-F: エラー詳細オーバーレイ (Toggle: `e`)
+    if app.error_overlay {
+        render_error_overlay(f, app);
     }
 }
 
@@ -608,6 +665,66 @@ fn render_help_overlay(f: &mut ratatui::Frame, app: &App) {
         .border_type(border_type_for(&app.theme))
         .border_style(Style::default().fg(ACCENT));
     let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, modal_area);
+}
+
+/// W7-F: エラー詳細モーダル — 中央 70% × 60% 枠で展開、wrap=true で多行 stack trace を表示。
+/// 配色: ERROR_C border + bold タイトル、stage / timestamp / err 全文を縦に並べる。
+fn render_error_overlay(f: &mut ratatui::Frame, app: &App) {
+    use ratatui::widgets::Clear;
+
+    let Some(detail) = &app.error_detail else { return; };
+
+    let area = f.area();
+    let modal_w = ((area.width as f32 * 0.70) as u16).max(40).min(area.width.saturating_sub(2));
+    let modal_h = ((area.height as f32 * 0.60) as u16).max(10).min(area.height.saturating_sub(2));
+    let modal_x = area.x + (area.width.saturating_sub(modal_w)) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+
+    f.render_widget(Clear, modal_area); // 背景クリア
+
+    // ヘッダー: 時刻 + stage
+    let header_stage = match detail.stage {
+        Some(s) => format!("stage: {}", s.label()),
+        None => "stage: (worker level)".to_string(),
+    };
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            " note-auto エラー詳細 ",
+            Style::default().add_modifier(Modifier::BOLD).fg(ERROR_C),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  時刻: ", Style::default().fg(SECONDARY)),
+            Span::raw(detail.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("  種別: ", Style::default().fg(SECONDARY)),
+            Span::raw(header_stage),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ─── error message ───",
+            Style::default().fg(SECONDARY),
+        )),
+    ];
+    // err 本文を行単位で追加 (wrap=true で長行は自動折返しされる)
+    for line in detail.msg.lines() {
+        lines.push(Line::from(vec![Span::raw("  "), Span::raw(line.to_string())]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  press e / Enter / q / Esc to close",
+        Style::default().fg(SECONDARY),
+    )));
+
+    let block = Block::default()
+        .title(" Error Detail ")
+        .borders(Borders::ALL)
+        .border_type(border_type_for(&app.theme))
+        .border_style(Style::default().fg(ERROR_C));
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, modal_area);
 }
 
