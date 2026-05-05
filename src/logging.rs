@@ -8,8 +8,9 @@
 //! - **ANSI**: `Theme.uses_color` を尊重して `with_ansi()` を切り替える。
 //! - **互換**: 引数なしの `init()` も残す (既存呼び出し位置の後方互換)。
 //!
-//! 将来 (Phase 2): `tracing-appender` 追加で hourly rolling JSON file を別レイヤとして並走させる。
-//! 現状は依存ゼロを優先し、bat の `2>&1` リダイレクトで代替する。
+//! v0.9.0 W7-D: `init_with_progress(&Theme, MultiProgress)` 追加。
+//! `MultiProgress::suspend` 経由の MakeWriter で tracing 出力時に progress bar を
+//! 一時退避 → log と bar の描画競合を解消する。
 
 use tracing_subscriber::{fmt, fmt::format::FmtSpan, prelude::*, EnvFilter};
 
@@ -23,14 +24,11 @@ pub fn init() {
 }
 
 /// テーマを反映した初期化。`main` で `Theme::init()` 後に呼ぶ。
+/// 出力先は stderr 直書き (MultiProgress 連携なし、CLI/TUI スタートアップ時のフォールバック)。
 pub fn init_with(theme: &Theme) {
-    // 二重初期化はサイレントに無視 (テスト時など)
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,note_auto=debug"));
 
-    // L12 (W7-C): span CLOSE 時に elapsed (time.busy / time.idle) を log に出力。
-    // lowlevel PR-I で導入された 4 stage tracing::info_span! の経過時間を観測可能にする。
-    // 例: `INFO close fetch{source_count=11}: time.busy=12.3s`
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -42,4 +40,83 @@ pub fn init_with(theme: &Theme) {
         .with(filter)
         .with(stderr_layer)
         .try_init();
+}
+
+/// W7-D: `MultiProgress` を渡して、tracing 出力時に progress bar を suspend する初期化。
+///
+/// `IndicatifBackend::new` から呼ばれ、tracing イベント発火時に
+/// `MultiProgress::suspend(|| eprint!(...))` を経由することで bar の cursor 制御と
+/// 競合せず log を出せる。tracing と log エコシステムは結合しないため、
+/// indicatif-log-bridge は不要 (自前 MakeWriter で完結)。
+///
+/// L12 互換: `with_span_events(FmtSpan::CLOSE)` で span CLOSE 時の elapsed も継続出力。
+pub fn init_with_progress(theme: &Theme, multi: indicatif::MultiProgress) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,note_auto=debug"));
+
+    let suspend_writer = MultiProgressWriter { multi };
+
+    let layer = fmt::layer()
+        .with_writer(suspend_writer)
+        .with_target(false)
+        .with_ansi(theme.uses_color)
+        .with_span_events(FmtSpan::CLOSE)
+        .compact();
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(layer)
+        .try_init();
+}
+
+/// `MultiProgress::suspend` 経由で stderr に書き込む `MakeWriter` 実装。
+///
+/// tracing-subscriber は event 発火ごとに `make_writer()` を呼んで新しい
+/// `Writer` を取得 → `Write::write_all` でバイト列を渡す。
+/// 一旦 buffer に溜めて、`Drop` 時に `MultiProgress::suspend` で進捗を退避し、
+/// stderr へまとめて書き出す。
+#[derive(Clone)]
+struct MultiProgressWriter {
+    multi: indicatif::MultiProgress,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MultiProgressWriter {
+    type Writer = SuspendingWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        SuspendingWriter {
+            multi: self.multi.clone(),
+            buf: Vec::with_capacity(256),
+        }
+    }
+}
+
+struct SuspendingWriter {
+    multi: indicatif::MultiProgress,
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for SuspendingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buf);
+        // suspend 中に各 ProgressBar の描画を消去 → クロージャ内で stderr 書込 → 復帰
+        // UFCS で Write::write_all を呼ぶ (use 不要)
+        self.multi.suspend(|| {
+            let mut stderr = std::io::stderr();
+            let _ = std::io::Write::write_all(&mut stderr, &chunk);
+        });
+        Ok(())
+    }
+}
+
+impl Drop for SuspendingWriter {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
 }

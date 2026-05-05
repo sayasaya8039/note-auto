@@ -400,6 +400,13 @@ impl IndicatifBackend {
             multi.set_draw_target(ProgressDrawTarget::hidden());
         }
 
+        // W7-D: tracing 出力時に MultiProgress::suspend 経由で stderr に書く
+        // logging を初期化し直す。既に main.rs::init_with(&theme) で初期化済の場合
+        // try_init() がサイレントに失敗するが、その場合は既存の stderr 直書きを維持。
+        // → IndicatifBackend が起動経路で最初に作られる場合 (典型的な Cli once / fetch-trends 等)
+        //   は MultiProgress 連動 layer が有効になり、log と progress bar の競合が解消する。
+        crate::logging::init_with_progress(&theme, multi.clone());
+
         // tick_strings は theme で切替 (Unicode Braille / ASCII)
         let ticks_unicode: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"];
         let ticks_ascii: &[&str] = &["|", "/", "-", "\\", "OK"];
