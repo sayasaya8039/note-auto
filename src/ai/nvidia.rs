@@ -11,6 +11,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::client::AiClient;
 use super::ImageAsset;
 
 const ENDPOINT: &str = "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.2-klein-4b";
@@ -21,6 +22,21 @@ pub struct NvidiaFluxClient<'a> {
     width: u32,
     height: u32,
     steps: u32,
+}
+
+impl AiClient for NvidiaFluxClient<'_> {
+    fn label(&self) -> &'static str {
+        "nvidia_flux"
+    }
+
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        self.http
+            .post(ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body)
+    }
 }
 
 impl<'a> NvidiaFluxClient<'a> {
@@ -50,26 +66,9 @@ impl<'a> NvidiaFluxClient<'a> {
             "steps": self.steps,
         });
 
-        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(ENDPOINT)
-                .bearer_auth(&self.api_key)
-                .header("Accept", "application/json")
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send(),
-            3,
-            "nvidia_flux",
-        ).await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("NVIDIA flux.2 {}: {}", status, txt));
-        }
-
-        let v: Value = resp.json().await.context("NVIDIA response parse")?;
+        // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
+        let v: Value = super::client::send_json(self, &body).await
+            .context("NVIDIA flux.2 request failed")?;
         let bytes = extract_png_bytes(&v, self.http).await?;
 
         Ok(ImageAsset {

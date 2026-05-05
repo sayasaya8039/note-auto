@@ -12,6 +12,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
+use super::client::AiClient;
 use super::ImageAsset;
 
 const ENDPOINT_TEMPLATE: &str =
@@ -24,6 +25,21 @@ pub struct GeminiImageClient<'a> {
     aspect_ratio: String,
     image_size: String,
     thinking_level: String,
+}
+
+impl AiClient for GeminiImageClient<'_> {
+    fn label(&self) -> &'static str {
+        "gemini_image"
+    }
+
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        let endpoint = ENDPOINT_TEMPLATE.replace("{model}", &self.model);
+        self.http
+            .post(endpoint)
+            .header("x-goog-api-key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(body)
+    }
 }
 
 impl<'a> GeminiImageClient<'a> {
@@ -61,7 +77,7 @@ impl<'a> GeminiImageClient<'a> {
     }
 
     pub async fn generate_prompt(&self, prompt: &str) -> Result<ImageAsset> {
-        let endpoint = ENDPOINT_TEMPLATE.replace("{model}", &self.model);
+        // AF2: endpoint 構築は AiClient::build_request 内で実施
         let body = json!({
             "contents": [{
                 "parts": [{ "text": prompt }]
@@ -78,25 +94,9 @@ impl<'a> GeminiImageClient<'a> {
             }
         });
 
-        // M2: transient + connect/timeout を 3 回まで指数バックオフで retry
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(&endpoint)
-                .header("x-goog-api-key", &self.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send(),
-            3,
-            "gemini_image",
-        ).await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini image {} ({}): {}", self.model, status, txt));
-        }
-
-        let v: Value = resp.json().await.context("Gemini response parse")?;
+        // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
+        let v: Value = super::client::send_json(self, &body).await
+            .with_context(|| format!("Gemini image {} request failed", self.model))?;
         let bytes = extract_inline_image(&v).ok_or_else(|| {
             anyhow!(
                 "Gemini response missing inlineData. body head: {}",

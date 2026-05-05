@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::client::AiClient;
 use super::{strip_code_fence, ArticleBrief, ArticleDraft, ResearchResult};
 use crate::scoring::SelectedTrend;
 
@@ -19,6 +20,21 @@ pub struct AnthropicClient<'a> {
     opus_model: String,
     haiku_model: String,
     max_tokens: u32,
+}
+
+impl AiClient for AnthropicClient<'_> {
+    fn label(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn build_request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        self.http
+            .post(ENDPOINT)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json")
+            .json(body)
+    }
 }
 
 impl<'a> AnthropicClient<'a> {
@@ -221,31 +237,14 @@ https://note.com/alvis8039/message
             ]
         });
 
-        // M2: transient (429/502/503 等) と connect/timeout を 3 回まで指数バックオフで retry
-        let resp = crate::util::send_with_retry(
-            || self.http
-                .post(ENDPOINT)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send(),
-            3,
-            "anthropic",
-        ).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Anthropic API {}: {}", status, txt));
-        }
-
         #[derive(Deserialize)]
         struct Resp { content: Vec<Block> }
         #[derive(Deserialize)]
         struct Block { #[serde(rename = "type")] kind: String, text: Option<String> }
 
-        let parsed: Resp = resp.json().await?;
+        // AF2: AiClient::build_request + client::send_json 経由で
+        //      M2 retry/backoff + status check + JSON parse + error 整形を統合実行
+        let parsed: Resp = super::client::send_json(self, &body).await?;
         let text = parsed.content.into_iter()
             .filter(|b| b.kind == "text")
             .filter_map(|b| b.text)
