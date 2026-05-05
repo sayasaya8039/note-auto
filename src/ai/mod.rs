@@ -49,6 +49,10 @@ pub struct ArticleDraft {
 /// 画像生成結果 (PNG bytes)
 #[derive(Debug, Clone)]
 pub struct ImageAsset {
+    /// 生成時の prompt (現状 reader なし、デバッグ・ログ用に保持)。
+    /// CI1 (warnings 0 化) のため `#[allow(dead_code)]` を明示。
+    /// 将来の image generation 経路再有効化時に活用予定。
+    #[allow(dead_code)]
     pub prompt: String,
     pub png_bytes: Vec<u8>,
 }

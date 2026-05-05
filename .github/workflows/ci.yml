@@ -1,0 +1,98 @@
+name: ci
+
+# CI1 (v0.9.0): cargo build / test / clippy + warnings 0 enforcement
+#
+# - clippy: -D warnings で warning を error 化
+# - build: ubuntu + windows ネイティブビルド検証 (zigbuild は採用しない、CI 上は標準 cargo)
+# - test: cargo test (将来 integration test 拡充の基盤)
+#
+# 注意: mimalloc は Cargo.toml で target='cfg(windows)' 限定なので Linux ビルドでは含まれない (OK)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  # RUSTFLAGS は build job 専用に設定 (clippy は --deny で別途強制)
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: clippy + test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-lint
+
+      - name: cargo clippy (warnings as errors)
+        # CI1 baseline (v0.9.0): build warnings 0 を強制。
+        # clippy 拡張 lint (style/complexity) は段階的導入のため、現状 2 系統を allow:
+        #   - if_same_then_else: display.rs (theme 分岐 boilerplate、UI 領域は別 PR で整理)
+        #   - type_complexity:   trends/mod.rs (Vec<BoxFuture<...>> futures vector、後の AF1 で抽象化)
+        # 将来 (Phase 4+) で個別 lint を解消し、allow を順次撤去予定。
+        run: |
+          cargo clippy --release --all-targets -- \
+            -D warnings \
+            -A clippy::if_same_then_else \
+            -A clippy::type_complexity
+
+      - name: cargo test
+        run: cargo test --release
+
+  build-linux:
+    name: cargo build --release (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build-linux
+
+      - name: cargo build
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release
+
+  build-windows:
+    name: cargo build --release (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build-windows
+
+      - name: cargo build
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release
