@@ -2,6 +2,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+// Windows: HeapAlloc の MT スループット劣化を回避するため mimalloc を採用。
+// fetch_all の 8 ソース並列パース + scoring の HashMap/HashSet で
+// String allocation が集中するため 5〜15% 全体スループット改善見込み。
+#[cfg(windows)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod ai;
 mod config;
 mod daemon;
