@@ -1,25 +1,31 @@
-//! macOS Big Sur dark テーマ風 CLI 表示層 (v0.7.6 — Phase 1)
+//! macOS Big Sur dark テーマ風 CLI 表示層 (v0.7.7 — Phase 1.5-A)
 //!
-//! 設計方針:
-//! - **依存ゼロ実装**: stdlib + 既存 crate (tracing/chrono) のみ。indicatif/console/owo-colors を
-//!   追加せず、ANSI escape を直接書く。バイナリサイズ膨張を避ける。
-//! - **graceful degrade**: `NO_COLOR` 環境変数最優先 / `--ascii` フラグ / 非TTY検出で自動 fallback。
-//! - **静的テーマ**: `Theme::init` を main で 1 回だけ呼ぶ。以降は `theme()` で取得。
-//! - **置換最小限**: main.rs から既存 `println!("✓ ...")` を `display::print_done(...)` 等に置き換える。
+//! 設計方針 (v0.7.7-A 改訂):
+//! - **`console` + `supports-color` で TTY/COLOR 検出統一**: 自前環境変数判定を排除し、
+//!   `console::Term` (Windows ConHost / Windows Terminal / Unix tty 等) と
+//!   `supports-color` (NO_COLOR / FORCE_COLOR / COLORTERM / WT_SESSION 一括判定) を採用。
+//! - **`owo-colors` で truecolor 着色**: ANSI escape の直書きを `OwoColorize::truecolor` に置換。
+//!   8-bit (256-color) fallback は ID 動的指定する API が owo-colors に無いため ANSI 直書きを残す。
+//! - **API 互換 100%**: `Theme::init` / `Theme::current` / `glyphs` / `accent` 等の公開シグネチャは
+//!   v0.7.6 から完全維持。内部実装のみ差替。main.rs の呼び出しは無変更で動く。
+//! - **NO_COLOR 最優先 / --ascii フラグ / 非TTY検出 で自動 fallback** は維持。
 //!
 //! 公開 API: ThemeOptions / ColorMode / Theme / palette / glyphs / progress / table / 各 print_* 関数
 //!
-//! NOTE (v0.7.6): 未使用ヘルパは v0.7.7 の wire-up (indicatif / comfy-table / owo-colors /
-//! console / supports-color を実 API 経路に組み込む段階) で消費される予定のため、モジュール
-//! 全体に `#![allow(dead_code)]` を付与している。v0.7.7 完了時に剥がす。
+//! NOTE (v0.7.7-A): 未使用ヘルパ (PipelineProgress 等) は Phase C の indicatif wire-up で
+//! 消費される予定のため、モジュール全体に `#![allow(dead_code)]` を付与している。
+//! Phase C 完了時に一括剥がす。
 
 #![allow(dead_code)]
 
-use std::io::{IsTerminal, Write};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::publish::RunSummary;
+
+// W4 console + W5 supports-color
+use console::Term;
+use supports_color::Stream as ColorStream;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Theme
@@ -82,61 +88,67 @@ impl Theme {
     }
 
     fn detect(opts: ThemeOptions) -> Self {
-        let is_tty = std::io::stdout().is_terminal();
+        // W4: console::Term で TTY 検出統一 (Windows ConHost / Windows Terminal / Unix tty)
+        let term = Term::stdout();
+        let is_tty = term.is_term();
 
-        // NO_COLOR は最優先 (https://no-color.org/)
+        // NO_COLOR 最優先 (https://no-color.org/)。supports-color も内部処理するが念のため明示。
         let no_color_env = std::env::var_os("NO_COLOR")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
 
+        // W5: supports-color で COLORTERM / FORCE_COLOR / TTY / CI 環境を一括判定
+        let color_support = supports_color::on(ColorStream::Stdout);
+
         let uses_color = match opts.color {
-            ColorMode::Always => !no_color_env, // NO_COLOR は --color=always にも勝つ
+            // --color=always: NO_COLOR が立っていれば常に false (NO_COLOR 最優先原則)
+            ColorMode::Always => !no_color_env,
             ColorMode::Never => false,
-            ColorMode::Auto => is_tty && !no_color_env,
+            // Auto: supports-color が判定 (NO_COLOR / FORCE_COLOR / TTY / CI 自動考慮)
+            ColorMode::Auto => color_support.is_some() && !no_color_env,
         };
 
-        let truecolor = uses_color && truecolor_supported();
-        let uses_unicode = !opts.force_ascii && unicode_supported();
+        let truecolor = uses_color
+            && color_support.map(|s| s.has_16m).unwrap_or(false);
+
+        // W4: Unicode サポート判定は permissive default (v0.7.6 互換)。
+        // - 第一: console::Term::features().wants_emoji() が true なら確実にサポート
+        //   (macOS Terminal / iTerm / Windows Terminal / VS Code 等)
+        // - 第二: cfg!(unix) は通常 UTF-8 環境
+        // - 第三 (fallback): LANG が UTF-8 系、または unset (default UTF-8 想定)、
+        //   または WT_SESSION 存在で楽観的に許可。
+        // ConHost 等の非 UTF-8 環境では --ascii を明示する運用 (v0.7.6 と同方針)。
+        let uses_unicode = !opts.force_ascii
+            && (term.features().wants_emoji()
+                || cfg!(unix)
+                || std::env::var("LANG")
+                    .map(|v| v.to_uppercase().contains("UTF"))
+                    .unwrap_or(true)
+                || std::env::var_os("WT_SESSION").is_some());
 
         Theme { uses_color, truecolor, uses_unicode, is_tty }
     }
 }
 
-fn truecolor_supported() -> bool {
-    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
-    matches!(colorterm.as_str(), "truecolor" | "24bit")
-        // Windows Terminal / VSCode / iTerm2
-        || std::env::var("WT_SESSION").is_ok()
-        || std::env::var("TERM_PROGRAM").map(|v| matches!(v.as_str(), "iTerm.app" | "vscode")).unwrap_or(false)
-}
-
-fn unicode_supported() -> bool {
-    // Windows ConHost (legacy) は UTF-8 にしないと罫線が化ける。
-    // chcp 65001 されている前提で許容。実害は --ascii で回避できる。
-    std::env::var("LANG").map(|v| v.to_uppercase().contains("UTF")).unwrap_or(true)
-        || std::env::var("WT_SESSION").is_ok()
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Palette (Big Sur dark)
+// Palette (Big Sur dark) — W3: (u8,u8,u8) タプルで宣言、owo_colors::OwoColorize::truecolor へ渡す
 
 pub mod palette {
-    /// 24bit RGB
-    #[derive(Clone, Copy, Debug)]
-    pub struct Rgb(pub u8, pub u8, pub u8);
+    /// 24bit RGB tuple. owo-colors の `OwoColorize::truecolor(r, g, b)` および
+    /// ANSI 256-color (8-bit) 各 fallback に渡す。
+    pub const ACCENT:    (u8, u8, u8) = (0, 122, 255);    // #007AFF systemBlue
+    pub const SUCCESS:   (u8, u8, u8) = (48, 209, 88);    // #30D158 systemGreen (Big Sur)
+    pub const WARNING:   (u8, u8, u8) = (255, 159, 10);   // #FF9F0A systemOrange
+    pub const ERROR_C:   (u8, u8, u8) = (255, 69, 58);    // #FF453A systemRed (Big Sur)
+    pub const SECONDARY: (u8, u8, u8) = (142, 142, 147);  // #8E8E93 secondaryLabel
+    pub const TERTIARY:  (u8, u8, u8) = (99, 99, 102);    // #636366 tertiaryLabel
 
-    pub const ACCENT: Rgb = Rgb(0, 122, 255); // #007AFF systemBlue
-    pub const SUCCESS: Rgb = Rgb(48, 209, 88); // #30D158 systemGreen (Big Sur)
-    pub const WARNING: Rgb = Rgb(255, 159, 10); // #FF9F0A systemOrange
-    pub const ERROR_C: Rgb = Rgb(255, 69, 58); // #FF453A systemRed (Big Sur)
-    pub const SECONDARY: Rgb = Rgb(142, 142, 147); // #8E8E93 secondaryLabel
-    pub const TERTIARY: Rgb = Rgb(99, 99, 102); // #636366 tertiaryLabel
-
-    /// 8-bit ANSI fallback (truecolor 不可時)
-    pub const ACCENT_8: u8 = 33; // bright blue
-    pub const SUCCESS_8: u8 = 10; // bright green
-    pub const WARNING_8: u8 = 214; // orange
-    pub const ERROR_8: u8 = 203; // bright red
+    /// 8-bit ANSI fallback (truecolor 不可時)。
+    /// owo-colors v4 は 256-color ID を動的指定する公開 API が無いため、ID は ANSI 直書きに使う。
+    pub const ACCENT_8: u8 = 33;     // bright blue
+    pub const SUCCESS_8: u8 = 10;    // bright green
+    pub const WARNING_8: u8 = 214;   // orange
+    pub const ERROR_8: u8 = 203;     // bright red
     pub const SECONDARY_8: u8 = 245; // grey
 }
 
@@ -200,14 +212,17 @@ pub fn glyphs(theme: &Theme) -> Glyphs {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANSI helpers
+// Color helpers (W3: owo-colors 経由)
 
-fn rgb_fg(theme: &Theme, c: palette::Rgb, fallback_8: u8, s: &str) -> String {
+/// truecolor は owo-colors の `OwoColorize::truecolor` を経由、
+/// 8-bit fallback は ID 動的指定 API が owo-colors v4 に無いため ANSI 直書きで残す。
+fn rgb_fg(theme: &Theme, rgb: (u8, u8, u8), fallback_8: u8, s: &str) -> String {
     if !theme.uses_color {
         return s.to_string();
     }
     if theme.truecolor {
-        format!("\x1b[38;2;{};{};{}m{}\x1b[0m", c.0, c.1, c.2, s)
+        use owo_colors::OwoColorize;
+        s.truecolor(rgb.0, rgb.1, rgb.2).to_string()
     } else {
         format!("\x1b[38;5;{}m{}\x1b[0m", fallback_8, s)
     }
@@ -229,7 +244,12 @@ pub fn dim(theme: &Theme, s: &str) -> String {
     rgb_fg(theme, palette::SECONDARY, palette::SECONDARY_8, s)
 }
 pub fn bold(theme: &Theme, s: &str) -> String {
-    if !theme.uses_color { s.to_string() } else { format!("\x1b[1m{}\x1b[0m", s) }
+    if !theme.uses_color {
+        s.to_string()
+    } else {
+        use owo_colors::OwoColorize;
+        s.bold().to_string()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,19 +588,47 @@ mod tests {
 
     #[test]
     fn ansi_truecolor_emits_38_2() {
+        // W3: owo-colors の truecolor 経由でも先頭は `\x1b[38;2;R;G;Bm` で同じ。
+        // 末尾の reset は owo-colors v4 では `\x1b[39m` (foreground reset) を使う。
         let t = Theme { uses_color: true, truecolor: true, uses_unicode: true, is_tty: true };
         let out = accent(&t, "x");
-        assert!(out.starts_with("\x1b[38;2;0;122;255m"));
-        assert!(out.ends_with("\x1b[0m"));
+        assert!(out.starts_with("\x1b[38;2;0;122;255m"), "got: {:?}", out);
+        // owo-colors v4 → `\x1b[39m`、自前 ANSI → `\x1b[0m` のどちらでも可
+        assert!(out.ends_with("\x1b[0m") || out.ends_with("\x1b[39m"), "got: {:?}", out);
+        assert_eq!(visible_len(&out), 1, "visible char must be just 'x'");
+    }
+
+    #[test]
+    fn ansi_8bit_fallback_when_no_truecolor() {
+        // truecolor=false 時は ANSI 256-color 直書き
+        let t = Theme { uses_color: true, truecolor: false, uses_unicode: true, is_tty: true };
+        let out = accent(&t, "x");
+        assert!(out.starts_with("\x1b[38;5;33m"), "got: {:?}", out);
+        assert!(out.ends_with("\x1b[0m"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn bold_uses_owo_colors() {
+        // W3: bold は owo-colors 経由
+        let t = Theme { uses_color: true, truecolor: true, uses_unicode: true, is_tty: true };
+        let out = bold(&t, "x");
+        assert!(out.contains("\x1b[1m"), "expected bold sequence, got: {:?}", out);
     }
 
     #[test]
     fn visible_len_strips_ansi() {
         assert_eq!(visible_len("hello"), 5);
         assert_eq!(visible_len("\x1b[1mhello\x1b[0m"), 5);
+        // owo-colors fg-reset (39) も剥がせる
+        assert_eq!(visible_len("\x1b[38;2;0;122;255mhello\x1b[39m"), 5);
+    }
+
+    #[test]
+    fn theme_color_mode_never_disables_truecolor() {
+        // W5: ColorMode::Never は supports-color の判定を完全上書き
+        let opts = ThemeOptions { force_ascii: false, color: ColorMode::Never };
+        let t = Theme::detect(opts);
+        assert!(!t.uses_color);
+        assert!(!t.truecolor);
     }
 }
-
-// 念のため: Write trait を使ったが import 残し
-#[allow(dead_code)]
-fn _write_unused(_w: &mut dyn Write) {}
