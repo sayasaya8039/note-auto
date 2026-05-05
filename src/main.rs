@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
             let out_path = out_dir.join("trends.json");
             std::fs::write(&out_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(path = %out_path.display(), count = selected.len(), "trends.json を出力");
+            display::print_scoring_table(&theme, &selected);
             display::print_check(&theme, &format!("{} ({}件)", out_path.display(), selected.len()));
         }
         Command::Write { from, out, limit, dry_run } => {
@@ -163,6 +164,7 @@ async fn main() -> Result<()> {
             let trends_path = out_dir.join("trends.json");
             std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(count = selected.len(), "trends selected");
+            display::print_scoring_table(&theme, &selected);
 
             let written = writer::run(&cfg, &selected, &out_dir).await?;
             display::print_check(&theme, &format!("{} 記事を出力 → {}", written.len(), out_dir.display()));
