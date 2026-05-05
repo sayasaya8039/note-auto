@@ -11,7 +11,7 @@
 //! 将来 (Phase 2): `tracing-appender` 追加で hourly rolling JSON file を別レイヤとして並走させる。
 //! 現状は依存ゼロを優先し、bat の `2>&1` リダイレクトで代替する。
 
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{fmt, fmt::format::FmtSpan, prelude::*, EnvFilter};
 
 use crate::display::Theme;
 
@@ -28,10 +28,14 @@ pub fn init_with(theme: &Theme) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,note_auto=debug"));
 
+    // L12 (W7-C): span CLOSE 時に elapsed (time.busy / time.idle) を log に出力。
+    // lowlevel PR-I で導入された 4 stage tracing::info_span! の経過時間を観測可能にする。
+    // 例: `INFO close fetch{source_count=11}: time.busy=12.3s`
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(false)
         .with_ansi(theme.uses_color)
+        .with_span_events(FmtSpan::CLOSE)
         .compact();
 
     let _ = tracing_subscriber::registry()

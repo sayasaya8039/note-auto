@@ -98,12 +98,30 @@ struct App {
     quit: bool,
     /// 最後の実行結果メッセージ (footer 表示用)
     last_msg: Option<String>,
+    /// W7-C: 起動時に History::load() で取得した直近 5 件 (Logs ペイン上に表示)
+    history_recent: Vec<String>,
+    /// W7-C: theme (border_type 切替に使用)
+    theme: Theme,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(theme: Theme) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+
+        // W7-C: 起動時に History::load() で直近 5 件を取得 (entries は append 順なので末尾が新しい)
+        let history_recent: Vec<String> = crate::history::History::load(None)
+            .ok()
+            .map(|h| {
+                h.entries
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .map(|e| format!("• {} [{}]", short_str(&e.title, 30), e.date))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Self {
             selected_idx: 0,
             list_state,
@@ -119,6 +137,8 @@ impl App {
             running: false,
             quit: false,
             last_msg: None,
+            history_recent,
+            theme,
         }
     }
 
@@ -191,7 +211,7 @@ enum AppEvent {
 
 /// `note-auto tui` の起動エントリポイント。alt screen + raw mode を取得し、
 /// イベントループを回して終了 (`q` / Ctrl-C / panic 時) に必ず後処理する。
-pub async fn run(_cfg: &Config, _theme: Theme) -> Result<()> {
+pub async fn run(_cfg: &Config, theme: Theme) -> Result<()> {
     // Terminal セットアップ (alt screen + raw mode)
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -200,7 +220,7 @@ pub async fn run(_cfg: &Config, _theme: Theme) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // RAII でクリーンアップを保証する guard
-    let result = run_app(&mut terminal).await;
+    let result = run_app(&mut terminal, theme).await;
 
     // 後処理: panic 時にも実行されるよう、明示的に呼ぶ
     disable_raw_mode()?;
@@ -216,8 +236,9 @@ pub async fn run(_cfg: &Config, _theme: Theme) -> Result<()> {
 
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
+    theme: Theme,
 ) -> Result<()> {
-    let mut app = App::new();
+    let mut app = App::new(theme);
 
     // 内部 channel: AppEvent
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -250,6 +271,16 @@ async fn run_app<B: ratatui::backend::Backend>(
 
     // 起動メッセージ
     app.push_log("note-auto TUI 起動。j/k 移動 / Enter 実行 / Tab ペイン / q 終了".to_string());
+
+    // W7-C: History の直近 5 件を Logs に流して可視化
+    if !app.history_recent.is_empty() {
+        app.push_log("─── 最近の履歴 ───".to_string());
+        let recent = app.history_recent.clone();
+        for line in recent {
+            app.push_log(line);
+        }
+        app.push_log("──────────────".to_string());
+    }
 
     while !app.quit {
         // Render
@@ -305,18 +336,17 @@ async fn handle_key(
         KeyCode::Tab => app.cycle_focus(),
         KeyCode::Enter => {
             if app.running {
-                app.push_log("既に実行中です".to_string());
+                app.push_log("既に実行中です (.lock 衝突防止)".to_string());
                 return;
             }
-            // W7-B では fetch_all のみのスタブ実行 (実 daemon::execute_cycle は W7-C で）
             app.running = true;
             app.reset_pipeline();
             let cat = CATEGORIES[app.selected_idx];
-            app.push_log(format!("→ {} (top {}) 実行開始 (W7-B スタブ)", cat.slug, cat.default_top));
+            app.push_log(format!("→ {} (top {}) 実行開始", cat.slug, cat.default_top));
 
             let tx = event_tx.clone();
             tokio::spawn(async move {
-                let res = run_pipeline_stub(cat, tx.clone()).await;
+                let res = run_pipeline_real(cat, tx.clone()).await;
                 let _ = tx.send(AppEvent::WorkerDone(res.map_err(|e| e.to_string())));
             });
         }
@@ -324,17 +354,27 @@ async fn handle_key(
     }
 }
 
-/// W7-B スタブ: PipelineProgress::new_tui 経由で 5 stage を順に進めるデモ。
-/// 本物の `daemon::execute_cycle` 統合は W7-C で行うが、本実装でも
-/// `PipelineProgress` API をフルに通り、TuiBackend → mpsc → AppEvent::Pipeline の経路を実機検証する。
-async fn run_pipeline_stub(
+/// W7-C: 実 `daemon::execute_cycle_with_progress` 統合。
+/// 選択された category に基づいて configs/<slug>.toml を再ロードし、
+/// `PipelineProgress::new_tui(pu_tx)` 経由で TuiBackend を渡して実行。
+/// `daemon::execute_cycle_with_progress` 内で `.note-auto.lock` も自動取得される。
+async fn run_pipeline_real(
     cat: Category,
     app_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<String> {
+    // category に応じて config を再ロード
+    let cfg_path = if cat.slug == "all" {
+        std::path::PathBuf::from("config.toml")
+    } else {
+        std::path::PathBuf::from("configs").join(format!("{}.toml", cat.slug))
+    };
+    let mut cfg = crate::config::Config::load(&cfg_path)?;
+    cfg.schedule.daily_top = cat.default_top;
+
     // PipelineProgress 用の専用 channel
     let (pu_tx, mut pu_rx) = mpsc::unbounded_channel::<crate::display::PipelineUpdate>();
 
-    // pu_rx → AppEvent::Pipeline へ forward する小さな task
+    // pu_rx → AppEvent::Pipeline へ forward する task
     let forward_tx = app_tx.clone();
     let forward = tokio::spawn(async move {
         while let Some(upd) = pu_rx.recv().await {
@@ -344,30 +384,24 @@ async fn run_pipeline_stub(
         }
     });
 
-    // 公開 API を使って backend に push (TuiBackend 経由)
+    // TuiBackend で進捗を mpsc に push する PipelineProgress
     let progress = crate::display::PipelineProgress::new_tui(pu_tx);
 
-    for (stage, label, simulate_fail) in [
-        (Stage::Fetch, "全ソース並列取得中…", false),
-        (Stage::Score, "スコアリング + 重複除去中…", false),
-        (Stage::Write, "AI 執筆 (mock)…", false),
-        (Stage::Publish, "note + X 投稿 (mock)…", false),
-        (Stage::Notify, "Slack 通知 (mock)…", false),
-    ] {
-        progress.stage_start(stage, label);
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        if simulate_fail {
-            progress.stage_fail(stage, "synthetic failure (W7-B test)");
-            return Err(anyhow::anyhow!("stub failure"));
-        }
-        progress.stage_done(stage, "完了");
-    }
+    // 実 daemon パイプライン (.lock 取得 → fetch → score → write → publish → notify)
+    let summary = crate::daemon::execute_cycle_with_progress(&cfg, &progress).await?;
 
-    // Drop で finish() が呼ばれ、PipelineUpdate::Finished が pu_tx から流れる
+    // Drop で finish() が呼ばれ、PipelineUpdate::Finished が forward に流れる
     drop(progress);
     let _ = forward.await;
 
-    Ok(format!("{} top {} 完了 (W7-B stub)", cat.slug, cat.default_top))
+    Ok(format!(
+        "{} top {} 完了: {} 記事 / {}s / {} 文字",
+        cat.slug,
+        cat.default_top,
+        summary.articles.len(),
+        summary.duration_secs,
+        summary.total_chars
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -447,7 +481,7 @@ fn render_sidebar(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Block::default()
                 .title(" Categories ")
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
+                .border_type(border_type_for(&app.theme))
                 .border_style(if focused {
                     Style::default().fg(ACCENT)
                 } else {
@@ -491,7 +525,7 @@ fn render_pipeline(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(" Pipeline ")
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(border_type_for(&app.theme))
         .border_style(if focused {
             Style::default().fg(ACCENT)
         } else {
@@ -515,7 +549,7 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(format!(" Logs ({}) ", app.logs.len()))
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(border_type_for(&app.theme))
         .border_style(if focused {
             Style::default().fg(ACCENT)
         } else {
@@ -523,4 +557,24 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &App) {
         });
     let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, area);
+}
+
+/// W7-C: theme.uses_unicode に応じた border_type 切替 (--ascii 反映)
+fn border_type_for(theme: &Theme) -> BorderType {
+    if theme.uses_unicode {
+        BorderType::Rounded
+    } else {
+        BorderType::Plain
+    }
+}
+
+/// 短縮ヘルパ (history 表示用)
+fn short_str(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        let head: String = chars.into_iter().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }

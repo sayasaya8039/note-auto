@@ -52,16 +52,32 @@ pub async fn run_daemon(cfg: Config) -> Result<()> {
     Ok(())
 }
 
+/// `execute_cycle` のデフォルト版。`PipelineProgress::new(theme)` で indicatif backend を作成する。
+/// 既存呼び出し (run_daemon / main::Once) はこれを使う (v0.7.7 互換)。
 pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
+    let theme = crate::display::Theme::current();
+    let progress = crate::display::PipelineProgress::new(theme);
+    execute_cycle_with_progress(cfg, &progress).await
+}
+
+/// `execute_cycle` の progress override 版 (W7-C で追加)。
+/// TUI モード (`cli::tui`) から `PipelineProgress::new_tui(tx)` を渡して、
+/// IndicatifBackend ではなく TuiBackend にステージ進捗を流し込む。
+///
+/// `.lock` ファイル方式で TUI vs cron daemon の排他制御も担う。
+pub async fn execute_cycle_with_progress(
+    cfg: &Config,
+    progress: &crate::display::PipelineProgress,
+) -> Result<RunSummary> {
     let start = std::time::Instant::now();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let hhmm = chrono::Local::now().format("%H:%M").to_string();
     let out_dir = PathBuf::from("drafts").join(&today);
     std::fs::create_dir_all(&out_dir)?;
 
-    // W1: indicatif MultiProgress でパイプライン全 5 stage を可視化
-    let theme = crate::display::Theme::current();
-    let progress = crate::display::PipelineProgress::new(theme);
+    // W7-C: .lock ファイルで TUI vs cron daemon の排他制御 (Windows 互換、flock 不要)
+    let _lock = LockGuard::acquire(&out_dir.join(".note-auto.lock"))
+        .with_context(|| "failed to acquire daemon lock — 別プロセスが実行中の可能性")?;
 
     // Stage 1: 起動通知
     let source_list = cfg.trends.sources.join(", ");
@@ -190,7 +206,43 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     // notify stage は呼び出し側 (main.rs / daemon::run_daemon) で `notify_summary` 後に
     // `progress.stage_done(Notify, ...)` するか、明示的に終了。ここでは progress を drop で締める。
     progress.stage_done(crate::display::Stage::Notify, "");
-    drop(progress);
 
     Ok(summary)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W7-C: .lock ファイル RAII guard (TUI vs cron daemon の排他制御)
+
+/// `.note-auto.lock` ファイルの RAII ガード。`acquire` で取得、Drop で削除。
+/// 既に存在していればエラーを返す (= 別プロセスが実行中)。
+struct LockGuard {
+    path: PathBuf,
+}
+
+impl LockGuard {
+    fn acquire(path: &std::path::Path) -> Result<Self> {
+        use std::fs::OpenOptions;
+        // create_new: 存在すれば EEXIST エラー
+        match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                let pid = std::process::id();
+                let _ = writeln!(f, "{pid}");
+                Ok(Self { path: path.to_path_buf() })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(anyhow::anyhow!(
+                    "lock file already exists: {} (別プロセスが実行中？古い lock なら手動削除)",
+                    path.display()
+                ))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
