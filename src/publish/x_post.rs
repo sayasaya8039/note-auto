@@ -48,13 +48,21 @@ pub async fn announce(
     )?;
 
     let client = crate::util::http_client()?;
-    let resp = client
-        .post(ENDPOINT)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+
+    // M1 (quality): X API は 429 (rate limit) や 502/503 で permanent fail していた。
+    //               util::send_with_retry で transient HTTP + connect/timeout を retry。
+    //               OAuth 1.0a の nonce/timestamp は build_oauth1_header で生成済、
+    //               短時間 retry (~3.5s 以内) なら nonce 重複問題は実用上発生しない。
+    let resp = crate::util::send_with_retry(
+        || client
+            .post(ENDPOINT)
+            .header("Authorization", auth.as_str())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send(),
+        3,
+        "x_api",
+    ).await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -86,13 +94,20 @@ pub async fn post_text(cfg: &Config, text: &str) -> Result<String> {
     let body = json!({ "text": text });
     let auth = build_oauth1_header("POST", ENDPOINT, key, secret, token, token_secret, &[])?;
     let client = crate::util::http_client()?;
-    let resp = client
-        .post(ENDPOINT)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+
+    // M1 (quality): X API 429 / 5xx を transient retry で吸収。
+    //               詳細は post_announce 側コメント参照。
+    let resp = crate::util::send_with_retry(
+        || client
+            .post(ENDPOINT)
+            .header("Authorization", auth.as_str())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send(),
+        3,
+        "x_api",
+    ).await?;
+
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
