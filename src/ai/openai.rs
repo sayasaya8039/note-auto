@@ -37,12 +37,18 @@ impl<'a> OpenAiImageClient<'a> {
             "n": 1,
         });
 
-        let resp = self.http
-            .post(ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
+        // M2: transient (HTTP 408/425/429/500/502/503/504) と connect/timeout を
+        //     3 回まで指数バックオフで retry。anthropic/xai/gemini/nvidia/pollo と同パターン。
+        //     v0.8.0 baseline で他 5 client は適用済 (4ba4ddb 経路)、本 PR で openai 補完。
+        let resp = crate::util::send_with_retry(
+            || self.http
+                .post(ENDPOINT)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send(),
+            3,
+            "openai_image",
+        ).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
