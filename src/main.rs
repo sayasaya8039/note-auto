@@ -10,6 +10,7 @@ use std::path::PathBuf;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod ai;
+mod cli;
 mod config;
 mod daemon;
 mod display;
@@ -102,6 +103,14 @@ enum Command {
         top: Option<usize>,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// macOS Big Sur dark テーマの ratatui TUI (3 ペイン: Sidebar / Pipeline / Logs)。
+    /// `--features tui` ビルド時のみ利用可能。
+    #[cfg(feature = "tui")]
+    Tui {
+        /// daemon 連携モード (W7-C で実装予定、本 W7-B では未実装)
+        #[arg(long)]
+        attach_daemon: bool,
     },
 }
 
@@ -260,6 +269,11 @@ async fn main() -> Result<()> {
             let summary = daemon::execute_cycle(&cfg).await?;
             publish::notify_summary(&cfg, &summary).await.ok();
             display::print_done(&theme, &summary);
+        }
+        #[cfg(feature = "tui")]
+        Command::Tui { attach_daemon: _ } => {
+            // TUI モードでは banner / tracing を抑止 (alt screen に干渉)
+            cli::tui::run(&cfg, theme).await?;
         }
     }
 
