@@ -12,14 +12,12 @@
 //!
 //! 公開 API: ThemeOptions / ColorMode / Theme / palette / glyphs / progress / table / 各 print_* 関数
 //!
-//! NOTE (v0.7.7-A): 未使用ヘルパ (PipelineProgress 等) は Phase C の indicatif wire-up で
-//! 消費される予定のため、モジュール全体に `#![allow(dead_code)]` を付与している。
-//! Phase C 完了時に一括剥がす。
-
-#![allow(dead_code)]
+//! NOTE (v0.7.7-C): Phase C 完了時に `#![allow(dead_code)]` を剥がした。
+//! 残存する未使用ヘルパ (`print_info` / `print_warning` / `print_error` 等) は
+//! 個別に `#[allow(dead_code)]` を付ける方針。将来 main から呼ぶ可能性があるため
+//! 残置。
 
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use crate::publish::RunSummary;
 
@@ -138,15 +136,18 @@ pub mod palette {
     /// ANSI 256-color (8-bit) 各 fallback に渡す。
     pub const ACCENT:    (u8, u8, u8) = (0, 122, 255);    // #007AFF systemBlue
     pub const SUCCESS:   (u8, u8, u8) = (48, 209, 88);    // #30D158 systemGreen (Big Sur)
+    #[allow(dead_code)] // Phase 2 で warning helper に wire 予定
     pub const WARNING:   (u8, u8, u8) = (255, 159, 10);   // #FF9F0A systemOrange
     pub const ERROR_C:   (u8, u8, u8) = (255, 69, 58);    // #FF453A systemRed (Big Sur)
     pub const SECONDARY: (u8, u8, u8) = (142, 142, 147);  // #8E8E93 secondaryLabel
+    #[allow(dead_code)] // Phase 2 で 3 階層 dim 表示に wire 予定
     pub const TERTIARY:  (u8, u8, u8) = (99, 99, 102);    // #636366 tertiaryLabel
 
     /// 8-bit ANSI fallback (truecolor 不可時)。
     /// owo-colors v4 は 256-color ID を動的指定する公開 API が無いため、ID は ANSI 直書きに使う。
     pub const ACCENT_8: u8 = 33;     // bright blue
     pub const SUCCESS_8: u8 = 10;    // bright green
+    #[allow(dead_code)] // Phase 2 で warning helper に wire 予定
     pub const WARNING_8: u8 = 214;   // orange
     pub const ERROR_8: u8 = 203;     // bright red
     pub const SECONDARY_8: u8 = 245; // grey
@@ -159,10 +160,18 @@ pub mod palette {
 pub struct Glyphs {
     pub check: &'static str,
     pub cross: &'static str,
+    /// Phase 2 で warning helper に wire 予定
+    #[allow(dead_code)]
     pub warn: &'static str,
+    /// Phase 2 で info helper に wire 予定
+    #[allow(dead_code)]
     pub info: &'static str,
     pub bullet: &'static str,
+    /// Phase 2 で進捗 prefix に wire 予定
+    #[allow(dead_code)]
     pub arrow: &'static str,
+    /// Phase 2 で sub-item bullet に wire 予定
+    #[allow(dead_code)]
     pub dot_dim: &'static str,
     pub box_tl: &'static str,
     pub box_tr: &'static str,
@@ -170,6 +179,8 @@ pub struct Glyphs {
     pub box_br: &'static str,
     pub h_line: &'static str,
     pub v_line: &'static str,
+    /// Phase 2 で SourceBar/ArticleBar の独自 spinner に wire 予定
+    #[allow(dead_code)]
     pub spinner: &'static [&'static str],
 }
 
@@ -234,6 +245,8 @@ pub fn accent(theme: &Theme, s: &str) -> String {
 pub fn success(theme: &Theme, s: &str) -> String {
     rgb_fg(theme, palette::SUCCESS, palette::SUCCESS_8, s)
 }
+/// Phase 2 で `print_warning` 等の wire を増やす際に使う。現状未使用。
+#[allow(dead_code)]
 pub fn warning(theme: &Theme, s: &str) -> String {
     rgb_fg(theme, palette::WARNING, palette::WARNING_8, s)
 }
@@ -287,21 +300,27 @@ pub fn print_banner(theme: &Theme, version: &str) {
     );
 }
 
+/// Phase 2 で wire 予定の info/skipped/warning/error helper。
+/// 現状 main.rs / daemon.rs では PipelineProgress を経由して通知しているため未使用。
+#[allow(dead_code)]
 pub fn print_info(theme: &Theme, msg: &str) {
     let g = glyphs(theme);
     eprintln!("{} {}", accent(theme, g.info), msg);
 }
 
+#[allow(dead_code)]
 pub fn print_skipped(theme: &Theme, reason: &str) {
     let g = glyphs(theme);
     eprintln!("{} {}", warning(theme, g.warn), dim(theme, reason));
 }
 
+#[allow(dead_code)]
 pub fn print_warning(theme: &Theme, msg: &str) {
     let g = glyphs(theme);
     eprintln!("{} {}", warning(theme, g.warn), msg);
 }
 
+#[allow(dead_code)]
 pub fn print_error(theme: &Theme, msg: &str) {
     let g = glyphs(theme);
     eprintln!("{} {}", error_color(theme, g.cross), msg);
@@ -313,15 +332,20 @@ pub fn print_check(theme: &Theme, msg: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Progress
+// Progress (W1: indicatif::MultiProgress 統合)
+//
+// 5 stage spinner を MultiProgress で並べ、各 stage_start/stage_done/stage_fail で
+// 状態遷移する。ProgressBar は Spinner 専用 (count なし)、tick_chars は theme に
+// 合わせて Braille / ASCII 切替。非 TTY なら DrawTarget::hidden で完全静音。
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
 pub enum Stage {
-    Fetch,
-    Score,
-    Write,
-    Publish,
-    Notify,
+    Fetch = 0,
+    Score = 1,
+    Write = 2,
+    Publish = 3,
+    Notify = 4,
 }
 
 impl Stage {
@@ -336,66 +360,96 @@ impl Stage {
     }
 }
 
-/// 軽量プログレス表示。indicatif 不使用、stderr に行ベースで出力。
-/// 非 TTY の場合は最終結果のみ出力（中間更新は抑制）。
+/// indicatif::MultiProgress 経由のパイプライン進捗オーケストレータ。
+///
+/// 5 stage (fetch / score / write / publish / notify) の状態遷移を
+/// MultiProgress + ProgressBar (Spinner) で可視化。
+/// 非 TTY 時は DrawTarget::hidden で完全静音、CI/redirect 出力にゴミを残さない。
 pub struct PipelineProgress {
+    multi: indicatif::MultiProgress,
+    bars: [indicatif::ProgressBar; 5],
     theme: Theme,
-    started: Instant,
 }
 
 impl PipelineProgress {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, started: Instant::now() }
+        use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+        let g = glyphs(&theme);
+        let multi = MultiProgress::new();
+
+        // 非 TTY (パイプ / リダイレクト / CI) は完全静音
+        if !theme.is_tty {
+            multi.set_draw_target(ProgressDrawTarget::hidden());
+        }
+
+        // tick_strings は theme で切替 (Unicode Braille / ASCII)
+        let ticks_unicode: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"];
+        let ticks_ascii: &[&str] = &["|", "/", "-", "\\", "OK"];
+        let ticks: &[&str] = if theme.uses_unicode { ticks_unicode } else { ticks_ascii };
+
+        let style = ProgressStyle::with_template("{prefix:<14} {spinner} {wide_msg}")
+            .unwrap()
+            .tick_strings(ticks);
+
+        let make_bar = |label: &str| -> ProgressBar {
+            let pb = multi.add(ProgressBar::new_spinner());
+            pb.set_style(style.clone());
+            // 起動時 prefix: "● <label>"
+            pb.set_prefix(format!("{} {}", accent(&theme, g.bullet), label));
+            pb
+        };
+
+        let bars = [
+            make_bar("fetch"),
+            make_bar("score"),
+            make_bar("write"),
+            make_bar("publish"),
+            make_bar("notify"),
+        ];
+
+        Self { multi, bars, theme }
     }
 
-    /// ステージ開始ログ
+    /// ステージ開始: spinner を開始し message を設定
     pub fn stage_start(&self, stage: Stage, msg: &str) {
-        let g = glyphs(&self.theme);
-        let label = format!("[{}]", stage.label());
-        eprintln!(
-            "{} {} {}",
-            accent(&self.theme, &label),
-            g.arrow,
-            msg
-        );
+        let bar = &self.bars[stage as usize];
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
+        bar.set_message(msg.to_string());
     }
 
-    /// ステージ完了
+    /// ステージ完了: prefix を ✓ に切替、spinner を停止
     pub fn stage_done(&self, stage: Stage, msg: &str) {
         let g = glyphs(&self.theme);
-        let label = format!("[{}]", stage.label());
-        eprintln!(
-            "{} {} {}",
-            success(&self.theme, g.check),
-            dim(&self.theme, &label),
-            msg
-        );
+        let bar = &self.bars[stage as usize];
+        bar.set_prefix(format!("{} {}", success(&self.theme, g.check), stage.label()));
+        bar.disable_steady_tick();
+        bar.finish_with_message(msg.to_string());
     }
 
-    /// ステージ失敗
+    /// ステージ失敗: prefix を ✗ に切替、abandon
     pub fn stage_fail(&self, stage: Stage, err: &str) {
         let g = glyphs(&self.theme);
-        let label = format!("[{}]", stage.label());
-        eprintln!(
-            "{} {} {} — {}",
-            error_color(&self.theme, g.cross),
-            dim(&self.theme, &label),
-            error_color(&self.theme, "failed"),
-            err
-        );
+        let bar = &self.bars[stage as usize];
+        bar.set_prefix(format!("{} {}", error_color(&self.theme, g.cross), stage.label()));
+        bar.disable_steady_tick();
+        bar.abandon_with_message(format!("failed: {err}"));
     }
 
-    /// 子イベント（ソース毎の進捗等）
-    pub fn item(&self, msg: &str) {
-        if !self.theme.is_tty {
-            return;
+    /// 全 stage 終了処理 (drop 時にも自動だが明示呼び出し用)
+    pub fn finish(&self) {
+        for bar in &self.bars {
+            if !bar.is_finished() {
+                bar.finish();
+            }
         }
-        let g = glyphs(&self.theme);
-        eprintln!("  {} {}", dim(&self.theme, g.dot_dim), dim(&self.theme, msg));
+        let _ = self.multi.clear();
     }
+}
 
-    pub fn elapsed_secs(&self) -> u64 {
-        self.started.elapsed().as_secs()
+impl Drop for PipelineProgress {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -549,7 +603,10 @@ fn visible_len(s: &str) -> usize {
 // ─────────────────────────────────────────────────────────────────────────────
 // Public re-exports for main.rs convenience
 
-/// shorthand: `display::theme()`
+/// shorthand: `display::theme()` — `Theme::current()` を直接呼ぶ簡略呼び出し。
+/// main.rs は `Theme::init()` の戻り値を直接保持するため未使用、Phase 2 で他モジュールから
+/// グローバル取得するときに wire 予定。
+#[allow(dead_code)]
 pub fn theme() -> Theme {
     Theme::current()
 }
