@@ -86,14 +86,13 @@ impl<'a> PolloClient<'a> {
         let png_url = self.poll_until_done(&url, 60, Duration::from_secs(5)).await?;
 
         // 3. download
-        let png_bytes = self.http
-            .get(&png_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?
-            .to_vec();
+        // M2: bare .send().await? を crate::util::fetch_bytes_with_retry で置換、
+        //     network blip による image silent loss を防ぐ。
+        let png_bytes = crate::util::fetch_bytes_with_retry(
+            self.http,
+            &png_url,
+            "pollo_image_dl",
+        ).await?;
 
         Ok(ImageAsset { prompt: prompt.to_string(), png_bytes })
     }

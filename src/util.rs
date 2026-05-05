@@ -157,6 +157,43 @@ where
     }
 }
 
+/// HTTP GET でバイナリを取得し、`Vec<u8>` を返す。M2 (image silent loss 防止)。
+///
+/// `send_with_retry` で transient + connect/timeout を 3 回まで retry、
+/// 非 2xx status は err 化、bytes() 取得失敗もエラー化。
+///
+/// 用途:
+/// - `pollo.rs` の最終 PNG download (poll 完了後の videoUrl fetch)
+/// - `openai.rs` の URL response (b64_json でなく url 形式の場合)
+/// - `nvidia.rs::fetch_url` (data フィールドが url の場合)
+///
+/// quality M2 報告: 旧実装は `?` 連鎖で network blip により bytes 取得失敗 → 全 article fail。
+/// 本 helper は retry + 詳細 error message で resilience 強化。
+pub async fn fetch_bytes_with_retry(
+    http: &reqwest::Client,
+    url: &str,
+    label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let resp = send_with_retry(
+        || http.get(url).send(),
+        3,
+        label,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{} fetch send failed: {}", label, e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(anyhow::anyhow!("{} fetch HTTP {}", label, status));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("{} fetch bytes failed: {}", label, e))?;
+    Ok(bytes.to_vec())
+}
+
 /// 指数バックオフ + jitter (1/4 of base) ms。最大 30s で頭打ち。
 fn backoff_ms(attempt: usize) -> u64 {
     use rand::Rng;
