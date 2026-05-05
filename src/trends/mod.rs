@@ -61,6 +61,9 @@ pub fn http_client() -> reqwest::Client {
 }
 
 /// 全ソースを並行で取得。個別失敗はログして継続。
+///
+/// L10: `#[tracing::instrument]` で stage 経過時間を自動計測（RUST_LOG=info,note_auto=debug）。
+#[tracing::instrument(name = "fetch", skip_all, fields(source_count = cfg.trends.sources.len()))]
 pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
     let client = http_client();
     let enabled: std::collections::HashSet<&str> =

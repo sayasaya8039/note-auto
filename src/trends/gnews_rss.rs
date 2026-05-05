@@ -71,32 +71,36 @@ pub async fn fetch_query(
 
 /// 各 TrendItem の URL を訪問し og:image を取得して image_urls に追記。
 /// 失敗は無視 (image_urls は空のまま)。
+///
+/// L11: `take(parallelism)` の意味論を「対象数上限 = 並列度」から
+///      「全件 / 並列度 N」に正規化。`buffer_unordered` で本来の並列度制御を実現。
 async fn enrich_og_images(
     client: &reqwest::Client,
     items: &mut [TrendItem],
     parallelism: usize,
 ) {
-    use futures::future::join_all;
+    use futures::stream::{self, StreamExt};
+    let parallelism = parallelism.max(1);
     let targets: Vec<(usize, String)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, t)| t.url.clone().map(|u| (i, u)))
-        .take(parallelism)
         .collect();
     if targets.is_empty() {
         return;
     }
 
-    let futs = targets.iter().map(|(idx, url)| {
+    let results: Vec<(usize, Option<String>)> = stream::iter(targets.into_iter().map(|(idx, url)| {
         let client = client.clone();
-        let url = url.clone();
-        let idx = *idx;
         async move {
             let og = fetch_og_image(&client, &url).await;
             (idx, og)
         }
-    });
-    let results = join_all(futs).await;
+    }))
+    .buffer_unordered(parallelism)
+    .collect()
+    .await;
+
     for (idx, og) in results {
         if let Some(og_url) = og {
             if let Some(item) = items.get_mut(idx) {
