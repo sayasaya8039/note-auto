@@ -12,6 +12,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod ai;
 mod config;
 mod daemon;
+mod display;
 mod history;
 mod logging;
 mod publish;
@@ -25,6 +26,20 @@ mod writer;
 struct Cli {
     #[arg(long, default_value = "config.toml", global = true)]
     config: PathBuf,
+
+    /// `note|x|google|hn|konbini|hyakkin|gnews|all` のいずれかを指定すると
+    /// `--config configs/<name>.toml` を上書き設定する (`all` のみルート `config.toml`)。
+    /// bat shim から呼ばれるためのショートカット。明示 `--config` 指定があれば本フラグが優先。
+    #[arg(long, global = true)]
+    category: Option<String>,
+
+    /// Unicode 罫線 / glyph を ASCII にフォールバック。旧 cmd.exe や非 UTF-8 環境向け。
+    #[arg(long, global = true)]
+    ascii: bool,
+
+    /// 色付け制御: `auto` (TTY 検出 + NO_COLOR 尊重) | `always` | `never`
+    #[arg(long, global = true, default_value = "auto", value_parser = display::parse_color_mode)]
+    color: display::ColorMode,
 
     #[command(subcommand)]
     command: Command,
@@ -93,9 +108,23 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    logging::init();
 
-    let mut cfg = config::Config::load(&cli.config)?;
+    // テーマ初期化 (NO_COLOR / --ascii / --color の解決)
+    let theme = display::Theme::init(display::ThemeOptions {
+        force_ascii: cli.ascii,
+        color: cli.color,
+    });
+    logging::init_with(&theme);
+
+    // --category 指定時は --config を上書き
+    let config_path = match cli.category.as_deref() {
+        Some("all") => PathBuf::from("config.toml"),
+        Some(cat) => PathBuf::from("configs").join(format!("{cat}.toml")),
+        None => cli.config.clone(),
+    };
+
+    let mut cfg = config::Config::load(&config_path)?;
+    display::print_banner(&theme, env!("CARGO_PKG_VERSION"));
     tracing::info!("note-auto v{} 起動", env!("CARGO_PKG_VERSION"));
 
     match cli.command {
@@ -107,7 +136,7 @@ async fn main() -> Result<()> {
             let out_path = out_dir.join("trends.json");
             std::fs::write(&out_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(path = %out_path.display(), count = selected.len(), "trends.json を出力");
-            println!("✓ {} ({}件)", out_path.display(), selected.len());
+            display::print_check(&theme, &format!("{} ({}件)", out_path.display(), selected.len()));
         }
         Command::Write { from, out, limit, dry_run } => {
             if dry_run { cfg.writer.dry_run = true; }
@@ -120,7 +149,7 @@ async fn main() -> Result<()> {
                 from.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
             });
             let written = writer::run(&cfg, &trends, &out_dir).await?;
-            println!("✓ {} 記事を出力", written.len());
+            display::print_check(&theme, &format!("{} 記事を出力", written.len()));
             for a in &written {
                 println!("  - {} ({}文字) → {}", a.title, a.char_count, a.md_path.display());
             }
@@ -136,7 +165,7 @@ async fn main() -> Result<()> {
             tracing::info!(count = selected.len(), "trends selected");
 
             let written = writer::run(&cfg, &selected, &out_dir).await?;
-            println!("✓ {} 記事を出力 → {}", written.len(), out_dir.display());
+            display::print_check(&theme, &format!("{} 記事を出力 → {}", written.len(), out_dir.display()));
             for a in &written {
                 println!("  - {} ({}文字) → {}", a.title, a.char_count, a.md_path.display());
             }
@@ -157,10 +186,11 @@ async fn main() -> Result<()> {
                 duration_secs: start.elapsed().as_secs(),
             };
             publish::notify_summary(&cfg, &summary).await.ok();
-            println!("✓ publish完了: note={}/X={}/Slack=送信",
+            display::print_done(&theme, &summary);
+            display::print_check(&theme, &format!("publish完了: note={}/X={}/Slack=送信",
                 summary.articles.iter().filter(|a| a.note_status == "published" || a.note_status == "draft").count(),
                 summary.articles.iter().filter(|a| a.x_status == "posted").count(),
-            );
+            ));
         }
         Command::Notify { message } => {
             let summary = publish::RunSummary {
@@ -178,11 +208,11 @@ async fn main() -> Result<()> {
                 duration_secs: 0,
             };
             publish::notify_summary(&cfg, &summary).await?;
-            println!("✓ Slack Webhook に送信");
+            display::print_check(&theme, "Slack Webhook に送信");
         }
         Command::XTest { message } => {
             let url = publish::x_post::post_text(&cfg, &message).await?;
-            println!("✓ X 投稿完了: {}", url);
+            display::print_check(&theme, &format!("X 投稿完了: {}", url));
         }
         Command::Daemon => {
             daemon::run_daemon(cfg).await?;
@@ -195,8 +225,7 @@ async fn main() -> Result<()> {
             if let Some(n) = top { cfg.schedule.daily_top = n; }
             let summary = daemon::execute_cycle(&cfg).await?;
             publish::notify_summary(&cfg, &summary).await.ok();
-            println!("✓ once完了 ({}記事 / {}s / {}文字)",
-                summary.articles.len(), summary.duration_secs, summary.total_chars);
+            display::print_done(&theme, &summary);
         }
     }
 
