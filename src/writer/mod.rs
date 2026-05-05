@@ -52,7 +52,7 @@ pub async fn run(cfg: &Config, trends: &[SelectedTrend], out_dir: &Path) -> Resu
                 tracing::info!(slug = %a.slug, chars = a.char_count, "article written");
                 written.push(a);
             }
-            Err(e) => tracing::error!(index = i, error = %e, "article failed"),
+            Err(e) => tracing::error!(index = i, error = format!("{:#}", e), "article failed"),
         }
     }
     if written.is_empty() {

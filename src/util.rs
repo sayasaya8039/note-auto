@@ -12,6 +12,13 @@ pub fn strip_code_fence(s: &str) -> String {
             return rest.trim_end_matches("```").trim().to_string();
         }
     }
+    // オブジェクト形式 `{...}` を優先的に抽出 (Grok が前置きを含めて返してくる場合があるため)。
+    // 配列だけ抜き出してしまうと `{ "key_facts": [...], "citations": [...] }` のような構造が壊れる。
+    if let (Some(l), Some(r)) = (t.find('{'), t.rfind('}')) {
+        if l < r {
+            return t[l..=r].to_string();
+        }
+    }
     // 文中に JSON 配列が混じっている場合に最初の `[` から最後の `]` を抽出
     if let (Some(l), Some(r)) = (t.find('['), t.rfind(']')) {
         if l < r {
