@@ -12,15 +12,21 @@ pub struct SelectedTrend {
 
 /// 上位 top 件を選定。
 /// 1. ソース内でスコアを 0-1 に正規化
-/// 2. ソース別ウェイト適用
-/// 3. タイトル類似度で重複除去
+/// 2. ソース別ウェイト適用 (`scoring_cfg.source_weights`)
+/// 3. タイトル類似度で重複除去 (`scoring_cfg.dedup_threshold`)
 /// 4. 上位 top 件
-pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
+pub fn select_top(
+    items: Vec<TrendItem>,
+    top: usize,
+    scoring_cfg: &crate::config::ScoringConfig,
+) -> Vec<SelectedTrend> {
     if items.is_empty() {
         return vec![];
     }
 
-    let default_weights = crate::config::ScoringConfig::default().source_weights;
+    // L7: ScoringConfig::default() でなく呼び出し側 config を尊重
+    //     (旧実装は dedup_threshold を 0.65 ハードコードで無視していた)
+    let dedup_th = scoring_cfg.dedup_threshold;
 
     let mut by_source: std::collections::HashMap<String, Vec<TrendItem>> = Default::default();
     for item in items {
@@ -30,7 +36,7 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
     let mut normalized: Vec<SelectedTrend> = Vec::new();
     for (src, mut group) in by_source {
         let max = group.iter().map(|t| t.raw_score).fold(0.0_f64, f64::max);
-        let weight = default_weights.get(&src).copied().unwrap_or(1.0);
+        let weight = scoring_cfg.source_weights.get(&src).copied().unwrap_or(1.0);
         group.sort_by(|a, b| b.raw_score.total_cmp(&a.raw_score));
         for item in group {
             let norm = if max > 0.0 { item.raw_score / max } else { 0.0 };
@@ -48,7 +54,7 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
     // カテゴリ/ソース分散を強制:
     //  1st pass: 各 source から高スコア順に 1 件ずつ ラウンドロビンで拾う
     //  それでも top に満たない場合は通常のスコア順で補充
-    //  タイトル類似度は bigram 0.65 で重複除去
+    //  タイトル類似度は bigram >= dedup_th で重複除去
     let mut selected: Vec<SelectedTrend> = Vec::new();
 
     // source 別にキューを作る (スコア降順)
@@ -67,7 +73,7 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
             if let Some(q) = queues.get_mut(src) {
                 while let Some(cand) = q.pop_front() {
                     let dup = selected.iter().any(|s|
-                        title_similarity(&s.item.title, &cand.item.title) >= 0.65
+                        title_similarity(&s.item.title, &cand.item.title) >= dedup_th
                     );
                     if !dup {
                         selected.push(cand);
@@ -79,13 +85,17 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
     }
 
     // 万一まだ足りない時はスコア順で補充
+    // L8: 既選 title の HashSet で完全一致チェックを O(N²) → O(N) 化
     if selected.len() < top {
+        let mut chosen_titles: std::collections::HashSet<String> =
+            selected.iter().map(|s| s.item.title.clone()).collect();
         for cand in normalized {
-            if selected.iter().any(|s| s.item.title == cand.item.title) { continue; }
+            if chosen_titles.contains(&cand.item.title) { continue; }
             let dup = selected.iter().any(|s|
-                title_similarity(&s.item.title, &cand.item.title) >= 0.65
+                title_similarity(&s.item.title, &cand.item.title) >= dedup_th
             );
             if !dup {
+                chosen_titles.insert(cand.item.title.clone());
                 selected.push(cand);
                 if selected.len() >= top { break; }
             }

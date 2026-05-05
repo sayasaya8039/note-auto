@@ -85,7 +85,7 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     // 履歴読み込み、重複を弾くため top を多めに選定
     let history = History::load(None).unwrap_or_default();
     let top = cfg.schedule.daily_top;
-    let pre = select_top(items, top * 4);
+    let pre = select_top(items, top * 4, &cfg.scoring);
     let mut selected: Vec<SelectedTrend> = Vec::new();
     let mut skipped_dup = 0;
     for cand in pre {

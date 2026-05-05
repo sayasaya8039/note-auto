@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
             let out_dir = resolve_out(out);
             std::fs::create_dir_all(&out_dir)?;
             let items = trends::fetch_all(&cfg).await?;
-            let selected = scoring::select_top(items, top);
+            let selected = scoring::select_top(items, top, &cfg.scoring);
             let out_path = out_dir.join("trends.json");
             std::fs::write(&out_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(path = %out_path.display(), count = selected.len(), "trends.json を出力");
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
             let out_dir = resolve_out(out);
             std::fs::create_dir_all(&out_dir)?;
             let items = trends::fetch_all(&cfg).await?;
-            let selected = scoring::select_top(items, top);
+            let selected = scoring::select_top(items, top, &cfg.scoring);
             let trends_path = out_dir.join("trends.json");
             std::fs::write(&trends_path, serde_json::to_string_pretty(&selected)?)?;
             tracing::info!(count = selected.len(), "trends selected");
