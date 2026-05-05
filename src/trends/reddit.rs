@@ -6,11 +6,21 @@
 use anyhow::Result;
 use atom_syndication::Feed;
 use futures::future::join_all;
+use std::sync::LazyLock;
 
 use crate::config::Config;
 use crate::trends::TrendItem;
 
-pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendItem>> {
+static REDDIT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("windows:note-auto:0.1 (by /u/note_auto_bot)")
+        .timeout(std::time::Duration::from_secs(30))
+        .gzip(true)
+        .build()
+        .expect("reddit client")
+});
+
+pub async fn fetch(_client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendItem>> {
     let subs = &cfg.trends.subreddits;
     if subs.is_empty() {
         return Ok(vec![]);
@@ -22,16 +32,9 @@ pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendIt
     };
     let per_sub = (cfg.trends.max_per_source / subs.len().max(1)).max(5);
 
-    let reddit_client = reqwest::Client::builder()
-        .user_agent("windows:note-auto:0.1 (by /u/note_auto_bot)")
-        .timeout(std::time::Duration::from_secs(30))
-        .gzip(true)
-        .build()
-        .unwrap_or_else(|_| client.clone());
-
     let futs = subs.iter().map(|sub| {
         let url = format!("https://old.reddit.com/r/{sub}/top.rss?t={t}&limit={per_sub}");
-        let c = reddit_client.clone();
+        let c = REDDIT_CLIENT.clone();
         let sub = sub.clone();
         async move { fetch_sub(&c, &url, &sub, per_sub).await }
     });

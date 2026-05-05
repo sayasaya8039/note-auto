@@ -85,7 +85,13 @@ pub async fn publish(cfg: &Config, article: &WrittenArticle) -> Result<PublishOu
         stdin.shutdown().await?;
     }
 
-    let out = child.wait_with_output().await?;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| anyhow!("playwright timeout (120s): {}", script))?
+    .with_context(|| "playwright wait failed")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     if !stderr.is_empty() {

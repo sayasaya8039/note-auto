@@ -6,7 +6,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_PATH: &str = "drafts/history.json";
 const SIMILARITY_THRESHOLD: f64 = 0.55; // bigram Jaccard、selectより厳しめ
@@ -34,7 +33,15 @@ impl History {
             return Ok(Self { path, entries: vec![] });
         }
         let txt = std::fs::read_to_string(&path)?;
-        let entries: Vec<HistoryEntry> = serde_json::from_str(&txt).unwrap_or_default();
+        let entries: Vec<HistoryEntry> = match serde_json::from_str(&txt) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "history.json corrupted, backing up");
+                let bak = path.with_extension("json.bak");
+                let _ = std::fs::copy(&path, &bak);
+                vec![]
+            }
+        };
         Ok(Self { path, entries })
     }
 
@@ -49,7 +56,7 @@ impl History {
 
     /// タイトルが履歴のいずれかと類似していれば true
     pub fn has_similar(&self, title: &str) -> bool {
-        self.entries.iter().any(|e| title_similarity(&e.title, title) >= SIMILARITY_THRESHOLD)
+        self.entries.iter().any(|e| crate::util::title_similarity(&e.title, title) >= SIMILARITY_THRESHOLD)
     }
 
     /// URL が履歴にあれば true (完全一致)
@@ -57,20 +64,4 @@ impl History {
         let u = url.trim();
         !u.is_empty() && self.entries.iter().any(|e| e.source_url.as_deref() == Some(u))
     }
-}
-
-fn title_similarity(a: &str, b: &str) -> f64 {
-    let ga = bigrams(a);
-    let gb = bigrams(b);
-    if ga.is_empty() || gb.is_empty() { return 0.0; }
-    let inter = ga.intersection(&gb).count() as f64;
-    let union = ga.union(&gb).count() as f64;
-    inter / union
-}
-
-fn bigrams(s: &str) -> std::collections::HashSet<String> {
-    let lower = s.to_lowercase();
-    let gs: Vec<&str> = lower.graphemes(true).collect();
-    if gs.len() < 2 { return std::iter::once(lower).collect(); }
-    gs.windows(2).map(|w| w.concat()).collect()
 }

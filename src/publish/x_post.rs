@@ -1,5 +1,7 @@
 //! X (Twitter) API v2 で告知ツイートを投稿 (OAuth 1.0a user context)
 
+use std::sync::LazyLock;
+
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
@@ -13,6 +15,13 @@ use crate::writer::WrittenArticle;
 type HmacSha1 = Hmac<Sha1>;
 
 const ENDPOINT: &str = "https://api.x.com/2/tweets";
+
+static X_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("x client")
+});
 
 pub async fn announce(
     cfg: &Config,
@@ -45,12 +54,9 @@ pub async fn announce(
 
     let auth = build_oauth1_header(
         "POST", ENDPOINT, key, secret, token, token_secret, &[],
-    );
+    )?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let resp = client
+    let resp = X_CLIENT
         .post(ENDPOINT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
@@ -86,11 +92,8 @@ pub async fn post_text(cfg: &Config, text: &str) -> Result<String> {
     };
 
     let body = json!({ "text": text });
-    let auth = build_oauth1_header("POST", ENDPOINT, key, secret, token, token_secret, &[]);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let resp = client
+    let auth = build_oauth1_header("POST", ENDPOINT, key, secret, token, token_secret, &[])?;
+    let resp = X_CLIENT
         .post(ENDPOINT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
@@ -148,7 +151,7 @@ fn build_oauth1_header(
     access_token: &str,
     access_secret: &str,
     extra_params: &[(&str, &str)],
-) -> String {
+) -> Result<String> {
     let nonce: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
         .take(32)
@@ -182,7 +185,8 @@ fn build_oauth1_header(
     let base_string = format!("{}&{}&{}", method, pe(url), pe(&param_string));
     let signing_key = format!("{}&{}", pe(consumer_secret), pe(access_secret));
 
-    let mut mac = HmacSha1::new_from_slice(signing_key.as_bytes()).expect("hmac key");
+    let mut mac = HmacSha1::new_from_slice(signing_key.as_bytes())
+        .map_err(|e| anyhow!("hmac key error: {e}"))?;
     mac.update(base_string.as_bytes());
     let sig = STANDARD.encode(mac.finalize().into_bytes());
 
@@ -203,7 +207,7 @@ fn build_oauth1_header(
         .map(|(k, v)| format!("{}=\"{}\"", pe(k), pe(v)))
         .collect::<Vec<_>>()
         .join(", "));
-    header
+    Ok(header)
 }
 
 /// OAuth percent-encoding (RFC 3986 unreserved: A-Z a-z 0-9 - . _ ~)

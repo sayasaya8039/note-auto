@@ -10,6 +10,7 @@ mod logging;
 mod publish;
 mod scoring;
 mod trends;
+mod util;
 mod writer;
 
 #[derive(Parser)]

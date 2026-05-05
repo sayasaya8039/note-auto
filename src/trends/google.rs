@@ -56,6 +56,5 @@ fn parse_traffic(s: &str) -> f64 {
 }
 
 fn html_to_text(s: &str) -> String {
-    let no_tags = regex::Regex::new(r"<[^>]+>").unwrap().replace_all(s, " ");
-    html_escape::decode_html_entities(&no_tags).trim().to_string()
+    crate::util::strip_html(s)
 }

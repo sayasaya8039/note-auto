@@ -57,12 +57,7 @@ impl TrendItem {
 
 /// HTTP クライアントを共有
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent("note-auto/0.1 (+https://note.com)")
-        .timeout(std::time::Duration::from_secs(30))
-        .gzip(true)
-        .build()
-        .expect("reqwest client")
+    crate::util::http_client().expect("reqwest client")
 }
 
 /// 全ソースを並行で取得。個別失敗はログして継続。

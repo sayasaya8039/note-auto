@@ -120,7 +120,7 @@ pub async fn fetch(_shared: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendI
             call_chat_fallback(&client, api_key, &prompt).await?
         }
     };
-    let cleaned = strip_code_fence(&text);
+    let cleaned = crate::util::strip_code_fence(&text);
 
     #[derive(Deserialize)]
     struct Topic {
@@ -319,21 +319,4 @@ fn extract_text(v: &serde_json::Value) -> Option<String> {
         }
     }
     None
-}
-
-fn strip_code_fence(s: &str) -> String {
-    let t = s.trim();
-    if let Some(rest) = t.strip_prefix("```json") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    if let Some(rest) = t.strip_prefix("```") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    // 文中に JSON 配列が混じっている場合に最初の `[` から最後の `]` を抽出
-    if let (Some(l), Some(r)) = (t.find('['), t.rfind(']')) {
-        if l < r {
-            return t[l..=r].to_string();
-        }
-    }
-    t.to_string()
 }

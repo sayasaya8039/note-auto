@@ -1,10 +1,26 @@
 //! Slack Incoming Webhook で実行結果サマリを投稿
 
+use std::sync::LazyLock;
+
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use super::RunSummary;
 use crate::config::Config;
+
+static SLACK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("slack client")
+});
+
+static SLACK_PROGRESS_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("slack progress client")
+});
 
 pub async fn post_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
     if cfg.publish.dry_run {
@@ -19,10 +35,7 @@ pub async fn post_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
     let blocks = build_blocks(summary);
     let body = json!({ "blocks": blocks });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let resp = client.post(url).json(&body).send().await?;
+    let resp = SLACK_CLIENT.post(url).json(&body).send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
@@ -93,17 +106,7 @@ pub async fn post_progress(cfg: &Config, text: &str) {
         return;
     };
     let body = json!({ "text": text });
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "slack progress: client build failed");
-            return;
-        }
-    };
-    match client.post(url).json(&body).send().await {
+    match SLACK_PROGRESS_CLIENT.post(url).json(&body).send().await {
         Ok(r) if !r.status().is_success() => {
             let st = r.status();
             let t = r.text().await.unwrap_or_default();

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::ai::{
-    anthropic::AnthropicClient, http_client, nvidia::NvidiaFluxClient, openai::OpenAiImageClient,
-    pollo::PolloClient, xai::GrokClient, ArticleBrief, ArticleDraft, ImageAsset, ResearchResult,
+    anthropic::AnthropicClient, gemini::GeminiImageClient, http_client, nvidia::NvidiaFluxClient,
+    openai::OpenAiImageClient, pollo::PolloClient, xai::GrokClient, ArticleBrief, ArticleDraft,
+    ImageAsset, ResearchResult,
 };
 use crate::config::Config;
 use crate::scoring::SelectedTrend;
@@ -113,7 +114,8 @@ async fn write_one(
             if dry_run {
                 Ok::<ArticleDraft, anyhow::Error>(stub_draft(&brief, &research))
             } else {
-                let key = cfg.writer.anthropic_api_key.as_deref().unwrap();
+                let key = cfg.writer.anthropic_api_key.as_deref()
+                    .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY required (or set writer.dry_run=true)"))?;
                 AnthropicClient::new(&http, key, &cfg.writer.opus_model, &cfg.writer.haiku_model, cfg.writer.max_tokens)
                     .write(&brief, &research, trend, cfg.writer.target_chars).await
                     .with_context(|| "Opus write failed")
@@ -157,11 +159,11 @@ async fn write_one(
     // 5. front matter + 保存
     let front_matter = format!(
         "---\ntitle: \"{}\"\ncategory: \"{}\"\ntags: [{}]\nslug: \"{}\"\nsource_url: \"{}\"\nchar_count: {}\n{}---\n\n",
-        brief.title.replace('"', "'"),
-        brief.category,
-        brief.tags.iter().map(|t| format!("\"{}\"", t.replace('"', "'"))).collect::<Vec<_>>().join(", "),
+        crate::util::yaml_escape(&brief.title),
+        crate::util::yaml_escape(&brief.category),
+        brief.tags.iter().map(|t| format!("\"{}\"", crate::util::yaml_escape(t))).collect::<Vec<_>>().join(", "),
         safe_slug,
-        trend.item.url.clone().unwrap_or_default(),
+        crate::util::yaml_escape(&trend.item.url.clone().unwrap_or_default()),
         draft.char_count,
         image_path.as_ref()
             .map(|p| format!("image: \"{}\"\n", p.file_name().unwrap().to_string_lossy()))
@@ -224,9 +226,27 @@ async fn generate_single_image(
     prompt: &str,
     quality: &str,
 ) -> anyhow::Result<ImageAsset> {
-    // 本文挿入用 (low quality) は NVIDIA flux.2-klein-4b を優先使用。
-    // NVIDIA キー未設定の場合は通常プロバイダにフォールバック。
+    // 本文挿入用 (low quality) は Nano Banana 2 (Gemini 3.1 Flash Image) を最優先。
+    // Gemini キー未設定なら NVIDIA flux.2-klein-4b、それも無ければ通常プロバイダへフォールバック。
     if quality == "low" {
+        if let Some(key) = cfg.writer.gemini_api_key.as_deref() {
+            match GeminiImageClient::new(http, key, &cfg.writer.gemini_image_model)
+                .with_aspect_ratio(&cfg.writer.gemini_aspect_ratio)
+                .with_image_size(&cfg.writer.gemini_image_size)
+                .with_thinking_level(&cfg.writer.gemini_thinking_level)
+                .generate_prompt(prompt)
+                .await
+            {
+                Ok(img) => return Ok(img),
+                Err(e) => {
+                    tracing::warn!(
+                        model = %cfg.writer.gemini_image_model,
+                        error = %e,
+                        "Gemini image failed, falling back to NVIDIA/provider"
+                    );
+                }
+            }
+        }
         if let Some(key) = cfg.writer.nvidia_api_key.as_deref() {
             return NvidiaFluxClient::new(http, key).generate_prompt(prompt).await;
         }

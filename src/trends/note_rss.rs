@@ -62,17 +62,9 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<TrendItem
         let Some(title) = item.title() else { continue };
         let mut it = TrendItem::new("note", title);
         it.url = item.link().map(|s| s.to_string());
-        it.summary = item.description().map(|d| strip_html(d));
+        it.summary = item.description().map(crate::util::strip_html);
         out.push(it);
     }
     Ok(out)
 }
 
-fn strip_html(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    let stripped = re.replace_all(s, " ");
-    html_escape::decode_html_entities(&stripped)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}

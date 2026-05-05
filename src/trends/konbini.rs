@@ -44,10 +44,8 @@ pub async fn fetch(client: &reqwest::Client, cfg: &Config) -> Result<Vec<TrendIt
     });
     let rss_results = futures::future::join_all(rss_futs).await;
     let mut rss_items = Vec::new();
-    for r in rss_results {
-        if let Ok(mut items) = r {
-            rss_items.append(&mut items);
-        }
+    for mut items in rss_results.into_iter().flatten() {
+        rss_items.append(&mut items);
     }
     if !rss_items.is_empty() {
         tracing::info!(count = rss_items.len(), "konbini: gnews RSS OK");
@@ -125,7 +123,7 @@ SNSや note 読者の興味を引きそうなものを {top_n} 件厳選して�
         .content
         .clone();
 
-    let cleaned = strip_code_fence(&content);
+    let cleaned = crate::util::strip_code_fence(&content);
 
     #[derive(Deserialize, Serialize)]
     struct Topic {
@@ -157,15 +155,4 @@ SNSや note 読者の興味を引きそうなものを {top_n} 件厳選して�
         .collect();
 
     Ok(items)
-}
-
-fn strip_code_fence(s: &str) -> String {
-    let t = s.trim();
-    if let Some(rest) = t.strip_prefix("```json") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    if let Some(rest) = t.strip_prefix("```") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    t.to_string()
 }

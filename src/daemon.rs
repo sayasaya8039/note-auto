@@ -3,7 +3,6 @@
 //! 発火時: fetch-trends → write → publish → notify を連結実行。
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -61,12 +60,27 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     std::fs::create_dir_all(&out_dir)?;
 
     // Stage 1: 起動通知
+    let source_list = cfg.trends.sources.join(", ");
+    let source_count = cfg.trends.sources.len();
     slack::post_progress(cfg, &format!(
-        "🚀 *note-auto 起動* ({today} {hhmm})\nトレンド収集開始 (4 ソース並列)"
+        "🚀 *note-auto 起動* ({today} {hhmm})\nトレンド収集開始 ({source_count} ソース並列: {source_list})"
     )).await;
 
     // 1. fetch
-    let items = fetch_all(cfg).await?;
+    let items = match fetch_all(cfg).await {
+        Ok(v) => v,
+        Err(e) => {
+            slack::post_progress(cfg, &format!(
+                "❌ *fetch 失敗* ({source_list})\n```{e}```"
+            )).await;
+            return Err(e);
+        }
+    };
+    if items.is_empty() {
+        slack::post_progress(cfg, &format!(
+            "⚠️ *トレンド0件* — 全ソース ({source_list}) から取得失敗または該当なし。直近のログを確認してください。"
+        )).await;
+    }
 
     // 履歴読み込み、重複を弾くため top を多めに選定
     let history = History::load(None).unwrap_or_default();
@@ -87,6 +101,9 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     }
     tracing::info!(selected = selected.len(), skipped_dup, "trends selected (dedup against history)");
     if selected.is_empty() {
+        slack::post_progress(cfg, &format!(
+            "⚠️ *新鮮トレンド 0 件* (重複スキップ {skipped_dup})\n履歴と重複しない候補が無いか、fetch が全失敗しています。"
+        )).await;
         return Err(anyhow::anyhow!("no fresh trends after history dedup (all candidates duplicate)"));
     }
 
@@ -150,6 +167,5 @@ pub async fn execute_cycle(cfg: &Config) -> Result<RunSummary> {
     let summary_path = out_dir.join("summary.json");
     std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)?;
 
-    let _ = Utc::now(); // keep chrono import
     Ok(summary)
 }

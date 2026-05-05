@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
+pub mod gemini;
+pub mod nvidia;
 pub mod openai;
 pub mod pollo;
 pub mod xai;
@@ -53,21 +55,38 @@ pub struct ImageAsset {
 
 /// 共通 HTTP クライアント (AI 用 — タイムアウト長め)
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent("note-auto/0.2")
-        .timeout(std::time::Duration::from_secs(180))
-        .gzip(true)
-        .build()
-        .expect("reqwest client")
+    crate::util::http_client_long().expect("reqwest client")
+}
+
+/// 今日の日付を JST (Asia/Tokyo) で "YYYY-MM-DD (曜日)" 形式で返す。
+/// 記事生成時のハルシネーション防止用に、全 LLM プロンプトへアンカーとして注入する。
+pub fn today_jst_label() -> String {
+    use chrono::Datelike;
+    let jst = chrono_tz::Asia::Tokyo;
+    let now = chrono::Utc::now().with_timezone(&jst);
+    let wd = ["月", "火", "水", "木", "金", "土", "日"]
+        [now.weekday().num_days_from_monday() as usize];
+    format!("{}-{:02}-{:02} ({})", now.year(), now.month(), now.day(), wd)
+}
+
+/// LLM プロンプト共通の「日付ハルシネーション防止」節。
+/// brief / research / write すべてに貼り付ける。
+pub fn date_policy_block(today: &str) -> String {
+    format!(
+        "【日付の厳守ルール — ハルシネーション防止】\n\
+- 今日の日付は {today} (JST)。これを唯一の確定事実として扱うこと。\n\
+- 本文中に書いてよい具体的な年月日は、次のいずれかに限る:\n\
+  (a) 今日の日付そのもの ({today})\n\
+  (b) 【リサーチ要約】【主要事実】【参考URL】または元記事タイトルに明示されている日付\n\
+  (c) 一般常識として固定されている歴史的日付 (例: 東京五輪 2021 など、疑う余地のないもの)\n\
+- 上記に該当しない日付 (発表日・発売日・イベント日・最終更新日など) を推測で書くのは禁止。\n\
+  不明な場合は「近日」「最近」「本記事執筆時点」「{today} 現在」等の相対表現を使うこと。\n\
+- 「今年」「今月」「先週」「数日前」は今日 ({today}) を基準に解釈する。未来の出来事を過去形で書かない。\n\
+- 年だけなら書いてよいが、特定月日 (例: 『4月15日』『2026年3月3日』) は必ず裏取りされたものだけ。\n"
+    )
 }
 
 /// JSON レスポンスからコードフェンスを剥がす
 pub(crate) fn strip_code_fence(s: &str) -> String {
-    let t = s.trim();
-    for prefix in ["```json", "```JSON", "```"] {
-        if let Some(rest) = t.strip_prefix(prefix) {
-            return rest.trim_end_matches("```").trim().to_string();
-        }
-    }
-    t.to_string()
+    crate::util::strip_code_fence(s)
 }

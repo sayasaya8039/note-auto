@@ -1,0 +1,56 @@
+# note-auto 設定ファイル (サンプル)
+# config.toml にコピーして使用してください。API キーは環境変数または .env ファイルで設定推奨。
+
+[trends]
+# 直近何時間のトレンドを見るか
+window_hours = 24
+# 1ソースあたり最大取得件数
+max_per_source = 20
+# 有効化するソース: x, google, gnews, note, hn, reddit, konbini, hyakkin
+sources = ["x", "konbini", "hyakkin", "gnews", "google", "note", "hn"]
+# Reddit 対象 subreddit
+subreddits = ["programming", "technology", "MachineLearning", "LocalLLaMA"]
+# xai_api_key は環境変数 XAI_API_KEY で設定
+
+[scoring]
+# 重複判定の類似度閾値 (0-1)
+dedup_threshold = 0.65
+
+[scoring.source_weights]
+x = 2.0
+gnews = 1.4
+konbini = 1.3
+hyakkin = 1.2
+google = 0.7
+note = 0.7
+reddit = 0.8
+hn = 0.4
+
+[writer]
+# API キーは環境変数で設定:
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY, POLLO_API_KEY, NVIDIA_API_KEY, GEMINI_API_KEY
+opus_model = "claude-opus-4-7"
+haiku_model = "claude-haiku-4-5-20251001"
+grok_model = "grok-3-latest"
+image_provider = "pollo"
+image_model = "openai-gpt-image-2-0"
+image_size = "16:9"
+target_chars = 3000
+max_tokens = 8000
+dry_run = false
+
+[publish]
+playwright_script = "scripts/note-publish.mjs"
+playwright_runtime = "node"
+cookie_dir = ".cookies"
+note_publish = false
+x_announce = true
+# X OAuth キーは環境変数で設定:
+#   X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET
+# slack_webhook_url は環境変数 SLACK_WEBHOOK_URL で設定
+dry_run = false
+
+[schedule]
+cron = "0 0 7 * * *"
+timezone = "Asia/Tokyo"
+daily_top = 3

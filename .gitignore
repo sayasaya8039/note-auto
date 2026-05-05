@@ -1,6 +1,8 @@
 /target
 /drafts
 .env
+config.toml
+config.local.toml
 *.log
 /.cookies
 /node_modules

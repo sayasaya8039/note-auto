@@ -1,5 +1,5 @@
 use crate::trends::TrendItem;
-use unicode_segmentation::UnicodeSegmentation;
+use crate::util::title_similarity;
 
 /// 正規化後の選定結果
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -31,7 +31,7 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
     for (src, mut group) in by_source {
         let max = group.iter().map(|t| t.raw_score).fold(0.0_f64, f64::max);
         let weight = default_weights.get(&src).copied().unwrap_or(1.0);
-        group.sort_by(|a, b| b.raw_score.partial_cmp(&a.raw_score).unwrap_or(std::cmp::Ordering::Equal));
+        group.sort_by(|a, b| b.raw_score.total_cmp(&a.raw_score));
         for item in group {
             let norm = if max > 0.0 { item.raw_score / max } else { 0.0 };
             let composite = norm * weight;
@@ -43,7 +43,7 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
         }
     }
 
-    normalized.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(std::cmp::Ordering::Equal));
+    normalized.sort_by(|a, b| b.composite_score.total_cmp(&a.composite_score));
 
     // カテゴリ/ソース分散を強制:
     //  1st pass: 各 source から高スコア順に 1 件ずつ ラウンドロビンで拾う
@@ -93,25 +93,4 @@ pub fn select_top(items: Vec<TrendItem>, top: usize) -> Vec<SelectedTrend> {
     }
 
     selected
-}
-
-/// Jaccard類似度（grapheme bigramベース）
-fn title_similarity(a: &str, b: &str) -> f64 {
-    let ga = bigrams(a);
-    let gb = bigrams(b);
-    if ga.is_empty() || gb.is_empty() {
-        return 0.0;
-    }
-    let inter = ga.intersection(&gb).count() as f64;
-    let union = ga.union(&gb).count() as f64;
-    inter / union
-}
-
-fn bigrams(s: &str) -> std::collections::HashSet<String> {
-    let lower = s.to_lowercase();
-    let gs: Vec<&str> = lower.graphemes(true).collect();
-    if gs.len() < 2 {
-        return std::iter::once(lower).collect();
-    }
-    gs.windows(2).map(|w| w.concat()).collect()
 }

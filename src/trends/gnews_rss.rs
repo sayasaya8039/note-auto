@@ -48,7 +48,7 @@ pub async fn fetch_query(
         .map(|it| {
             let title = it.title().unwrap_or("(no title)").to_string();
             let link = it.link().map(|s| s.to_string());
-            let summary = it.description().map(strip_html);
+            let summary = it.description().map(crate::util::strip_html);
             let pub_date = it
                 .pub_date()
                 .and_then(|d| DateTime::parse_from_rfc2822(d).ok())
@@ -156,10 +156,4 @@ fn extract_og_image(html: &str, base: &url::Url) -> Option<String> {
     } else {
         None
     }
-}
-
-fn strip_html(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    let stripped = re.replace_all(s, "");
-    html_escape::decode_html_entities(&stripped).trim().to_string()
 }
