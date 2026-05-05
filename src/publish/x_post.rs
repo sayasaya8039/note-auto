@@ -1,7 +1,5 @@
 //! X (Twitter) API v2 で告知ツイートを投稿 (OAuth 1.0a user context)
 
-use std::sync::LazyLock;
-
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
@@ -15,13 +13,6 @@ use crate::writer::WrittenArticle;
 type HmacSha1 = Hmac<Sha1>;
 
 const ENDPOINT: &str = "https://api.x.com/2/tweets";
-
-static X_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("x client")
-});
 
 pub async fn announce(
     cfg: &Config,
@@ -56,7 +47,8 @@ pub async fn announce(
         "POST", ENDPOINT, key, secret, token, token_secret, &[],
     )?;
 
-    let resp = X_CLIENT
+    let client = crate::util::http_client()?;
+    let resp = client
         .post(ENDPOINT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
@@ -93,7 +85,8 @@ pub async fn post_text(cfg: &Config, text: &str) -> Result<String> {
 
     let body = json!({ "text": text });
     let auth = build_oauth1_header("POST", ENDPOINT, key, secret, token, token_secret, &[])?;
-    let resp = X_CLIENT
+    let client = crate::util::http_client()?;
+    let resp = client
         .post(ENDPOINT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")

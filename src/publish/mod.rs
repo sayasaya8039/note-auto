@@ -6,6 +6,7 @@
 //! 3. Slack へ実行結果通知 (Incoming Webhook)
 
 use anyhow::Result;
+use futures::stream::{self, StreamExt};
 use serde::Serialize;
 
 pub mod note;
@@ -38,16 +39,23 @@ pub struct RunSummary {
     pub duration_secs: u64,
 }
 
+/// 記事リストを並列公開する (並列度 2、Playwright セッション競合を抑制)。
+///
+/// articles.to_vec() で HRTB lifetime 問題を回避し、buffered(2) で並列処理。
 pub async fn publish_all(cfg: &Config, articles: &[WrittenArticle]) -> Result<Vec<PublishResult>> {
     if articles.is_empty() {
         return Ok(vec![]);
     }
 
-    let mut results = Vec::new();
-    for a in articles {
-        let r = publish_one(cfg, a).await;
-        results.push(r);
-    }
+    let owned: Vec<WrittenArticle> = articles.to_vec();
+    let results: Vec<PublishResult> = stream::iter(owned)
+        .map(|a| {
+            let cfg = cfg.clone();
+            async move { publish_one(&cfg, &a).await }
+        })
+        .buffered(2)
+        .collect()
+        .await;
     Ok(results)
 }
 

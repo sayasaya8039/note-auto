@@ -1,26 +1,13 @@
 //! Slack Incoming Webhook で実行結果サマリを投稿
-
-use std::sync::LazyLock;
+//!
+//! Q2 (panic=abort 安全化): LazyLock<reqwest::Client> の expect() を廃止し
+//! util::http_client() 共有クライアントを使用する (OnceLock 経由でパニック不可)。
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use super::RunSummary;
 use crate::config::Config;
-
-static SLACK_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("slack client")
-});
-
-static SLACK_PROGRESS_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .expect("slack progress client")
-});
 
 pub async fn post_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
     if cfg.publish.dry_run {
@@ -32,10 +19,11 @@ pub async fn post_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
         return Ok(());
     };
 
+    let client = crate::util::http_client()?;
     let blocks = build_blocks(summary);
     let body = json!({ "blocks": blocks });
 
-    let resp = SLACK_CLIENT.post(url).json(&body).send().await?;
+    let resp = client.post(url).json(&body).send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
@@ -50,7 +38,7 @@ fn build_blocks(s: &RunSummary) -> Vec<serde_json::Value> {
     let x_ok = s.articles.iter().filter(|a| a.x_status == "posted").count();
     let errors: Vec<String> = s.articles.iter().flat_map(|a| a.errors.clone()).collect();
 
-    let header = format!("📝 note-auto 実行レポート ({})", s.date);
+    let header = format!("\u{1f4dd} note-auto 実行レポート ({})", s.date);
     let summary_line = format!(
         "記事: {} / note投稿: {} / X告知: {} / 総文字数: {} / 所要: {}s",
         total, note_ok, x_ok, s.total_chars, s.duration_secs
@@ -59,14 +47,14 @@ fn build_blocks(s: &RunSummary) -> Vec<serde_json::Value> {
     let mut articles_text = String::new();
     for a in &s.articles {
         let note_mark = match a.note_status.as_str() {
-            "published" => "🟢",
-            "draft" => "🟡",
+            "published" => "\u{1f7e2}",
+            "draft" => "\u{1f7e1}",
             "skipped" => "⚪",
-            _ => "🔴",
+            _ => "\u{1f534}",
         };
         articles_text.push_str(&format!("{} *{}*\n", note_mark, escape(&a.title)));
         if let Some(u) = &a.note_url {
-            articles_text.push_str(&format!("   ↳ <{u}|note>  "));
+            articles_text.push_str(&format!("   ↓ <{u}|note>  "));
         }
         if let Some(u) = &a.x_tweet_url {
             articles_text.push_str(&format!("<{u}|X>"));
@@ -105,8 +93,12 @@ pub async fn post_progress(cfg: &Config, text: &str) {
     let Some(url) = cfg.publish.slack_webhook_url.as_deref() else {
         return;
     };
+    let Ok(client) = crate::util::http_client() else {
+        tracing::warn!("slack progress: HTTP client unavailable");
+        return;
+    };
     let body = json!({ "text": text });
-    match SLACK_PROGRESS_CLIENT.post(url).json(&body).send().await {
+    match client.post(url).json(&body).send().await {
         Ok(r) if !r.status().is_success() => {
             let st = r.status();
             let t = r.text().await.unwrap_or_default();
