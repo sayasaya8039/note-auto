@@ -1,0 +1,64 @@
+name: release
+
+# CI2 (v0.9.0): tag push (vMAJOR.MINOR.PATCH) で自動 binary build + GitHub Release artifact 添付
+#
+# 動作:
+#   1. tag push 検出 (e.g., v0.9.0)
+#   2. ubuntu / windows で release build (cargo build --release)
+#   3. binary を artifact として GitHub Release に添付
+#   4. Release は draft=false で即公開 (CHANGELOG 等は別途 README/CHANGELOG.md で管理)
+#
+# 注意: Linux native + Windows native build。macOS は需要が出たら追加。
+#       cross-compile (zigbuild 等) は将来検討、現状は各 OS で native build。
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # gh release create / artifact upload に必要
+
+jobs:
+  build-and-release:
+    name: build + release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: note-auto
+            asset_suffix: linux-x86_64
+          - os: windows-latest
+            artifact_name: note-auto.exe
+            asset_suffix: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.os }}
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Rename artifact (asset_suffix)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.artifact_name }}" "dist/note-auto-${{ github.ref_name }}-${{ matrix.asset_suffix }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}"
+          ls -la dist/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          # tag push のため自動的に対応 release が作成 / アタッチされる
+          # body / draft は別途 release 編集で対応 (CHANGELOG はコミット直後に commander が反映)
