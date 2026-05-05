@@ -400,90 +400,111 @@ impl PipelineProgress {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Summary table (comfy-table 不使用、自前で UTF-8 罫線を組む)
+// Summary table (W2: comfy-table 統合)
+//
+// - Unicode (rounded): preset UTF8_FULL_CONDENSED + 角丸ヘッダ
+// - ASCII (--ascii):   preset ASCII_BORDERS_ONLY_CONDENSED
+// - 着色: ヘッダは bold、note/X status は success/dim/error_color で塗る
+// - 幅制御: ContentArrangement::Dynamic + theme 検出済端末幅 (or fallback 100)
 
+fn make_table(theme: &Theme) -> comfy_table::Table {
+    use comfy_table::{
+        presets::{ASCII_BORDERS_ONLY_CONDENSED, UTF8_FULL_CONDENSED},
+        ContentArrangement, Table,
+    };
+    let mut table = Table::new();
+    let preset = if theme.uses_unicode {
+        UTF8_FULL_CONDENSED
+    } else {
+        ASCII_BORDERS_ONLY_CONDENSED
+    };
+    table
+        .load_preset(preset)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        // 端末幅取得 (console::Term 経由) — 取れなければ 100 cols
+        .set_width(
+            console::Term::stdout()
+                .size_checked()
+                .map(|(_h, w)| w)
+                .unwrap_or(100),
+        );
+    table
+}
+
+/// publish 完了サマリ表 (写経の `print_done` 互換)。`PublishResult` の slug / title /
+/// note_status / x_status を rounded 表で表示し、フッタに件数 / 経過秒 / 総文字数を出す。
 pub fn print_done(theme: &Theme, summary: &RunSummary) {
-    let g = glyphs(theme);
+    use comfy_table::Cell;
 
-    // ヘッダ + 行データ
-    let headers = ["#", "Slug", "Title", "Chars", "note", "X"];
-    let mut rows: Vec<[String; 6]> = Vec::with_capacity(summary.articles.len());
+    let mut table = make_table(theme);
+    table.set_header(vec![
+        Cell::new(bold(theme, "#")),
+        Cell::new(bold(theme, "Slug")),
+        Cell::new(bold(theme, "Title")),
+        Cell::new(bold(theme, "note")),
+        Cell::new(bold(theme, "X")),
+    ]);
+
     for (i, a) in summary.articles.iter().enumerate() {
-        rows.push([
-            format!("{}", i + 1),
-            truncate(&a.slug, 20),
-            truncate(&a.title, 32),
-            String::new(), // chars は WrittenArticle 側にあり、PublishResult にはないので空
-            short_status(theme, &a.note_status),
-            short_status(theme, &a.x_status),
+        table.add_row(vec![
+            Cell::new(format!("{}", i + 1)),
+            Cell::new(truncate(&a.slug, 20)),
+            Cell::new(truncate(&a.title, 40)),
+            Cell::new(short_status(theme, &a.note_status)),
+            Cell::new(short_status(theme, &a.x_status)),
         ]);
     }
 
-    // 列幅計算
-    let mut widths = [0usize; 6];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = visible_len(h);
-    }
-    for row in &rows {
-        for (i, c) in row.iter().enumerate() {
-            widths[i] = widths[i].max(visible_len(c));
-        }
-    }
-    let widths = widths;
-
-    // 罫線
-    let h = g.h_line;
-    let make_sep = |left: &str, mid: &str, right: &str| -> String {
-        let mut s = String::from(left);
-        for (i, w) in widths.iter().enumerate() {
-            s.push_str(&h.repeat(w + 2));
-            s.push_str(if i + 1 < widths.len() { mid } else { right });
-        }
-        s
-    };
-
-    let top = make_sep(g.box_tl, &cross_glyph(theme, "top"), g.box_tr);
-    let mid = make_sep(g.v_line.trim_end(), &cross_glyph(theme, "mid"), g.v_line.trim_end());
-    let bot = make_sep(g.box_bl, &cross_glyph(theme, "bot"), g.box_br);
-
-    let render_row = |cells: &[String; 6]| -> String {
-        let mut s = String::from(g.v_line);
-        for (i, c) in cells.iter().enumerate() {
-            let pad = widths[i].saturating_sub(visible_len(c));
-            s.push(' ');
-            s.push_str(c);
-            s.push_str(&" ".repeat(pad + 1));
-            s.push_str(g.v_line);
-        }
-        s
-    };
-
-    let header_strs: [String; 6] =
-        std::array::from_fn(|i| bold(theme, headers[i]));
-
     println!();
-    println!("{}", top);
-    println!("{}", render_row(&header_strs));
-    println!("{}", mid);
-    for row in &rows {
-        println!("{}", render_row(row));
-    }
-    println!("{}", bot);
+    println!("{table}");
 
     // フッタ
-    let footer = format!(
+    let g = glyphs(theme);
+    println!(
         "{} {} 記事 / {}s / {} 文字",
         success(theme, g.check),
         summary.articles.len(),
         summary.duration_secs,
         summary.total_chars
     );
-    println!("{}", footer);
 }
 
-fn cross_glyph(theme: &Theme, _pos: &str) -> String {
-    // シンプル化: 単純に v_line を返す（隅は box_* を使うため _pos は将来用）
-    if theme.uses_unicode { "┼".to_string() } else { "+".to_string() }
+/// scoring 結果サマリ表。`SelectedTrend` の source / title / raw_score / composite_score を表示。
+/// main.rs の `Run` / `Once` コマンドで scoring 完了直後に呼ぶ想定。
+pub fn print_scoring_table(theme: &Theme, selected: &[crate::scoring::SelectedTrend]) {
+    use comfy_table::Cell;
+
+    if selected.is_empty() {
+        return;
+    }
+
+    let mut table = make_table(theme);
+    table.set_header(vec![
+        Cell::new(bold(theme, "#")),
+        Cell::new(bold(theme, "Source")),
+        Cell::new(bold(theme, "Title")),
+        Cell::new(bold(theme, "Raw")),
+        Cell::new(bold(theme, "Composite")),
+    ]);
+
+    for (i, s) in selected.iter().enumerate() {
+        table.add_row(vec![
+            Cell::new(format!("{}", i + 1)),
+            Cell::new(accent(theme, &s.item.source)),
+            Cell::new(truncate(&s.item.title, 48)),
+            Cell::new(format!("{:.2}", s.item.raw_score)),
+            Cell::new(success(theme, &format!("{:.3}", s.composite_score))),
+        ]);
+    }
+
+    println!();
+    println!("{table}");
+    let g = glyphs(theme);
+    println!(
+        "{} {} 件選定",
+        success(theme, g.check),
+        selected.len()
+    );
 }
 
 fn short_status(theme: &Theme, status: &str) -> String {
