@@ -119,16 +119,40 @@ impl<'a> PolloClient<'a> {
 
         for i in 1..=max_iter {
             tokio::time::sleep(interval).await;
-            let resp = self.http
-                .get(url)
-                .header("x-api-key", &self.api_key)
-                .send()
-                .await?;
+
+            // H1 (quality 報告): 旧実装は `?` で network blip 1 回で task 全 fail →
+            //                   pollo 課金済 + inline_image_paths 0 件の silent loss。
+            // 修正: send_with_retry で transient + connect/timeout を 2 回まで retry、
+            //       それでも失敗なら continue で polling 続行。
+            //       (polling 自体が「待機 + 再試行」なので、1 iter 失敗 = 全 task abort
+            //        という挙動は本来不要だった。)
+            //
+            // Independently identified by quality (H1) and team-lead (Plan A).
+            let resp = match crate::util::send_with_retry(
+                || self.http.get(url).header("x-api-key", &self.api_key).send(),
+                2,
+                "pollo_poll",
+            ).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, iter = i, "pollo poll send failed, continuing");
+                    continue;
+                }
+            };
+
             if !resp.status().is_success() {
                 tracing::debug!(status = %resp.status(), iter = i, "poll non-200");
                 continue;
             }
-            let poll: PollResp = resp.json().await.context("parse poll response")?;
+            // H1: JSON parse 失敗時も `?` で全 abort せず continue
+            //     (一時的な malformed response や接続切れに対する resilience)
+            let poll: PollResp = match resp.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, iter = i, "pollo poll JSON parse failed, continuing");
+                    continue;
+                }
+            };
             match poll.data.status.as_str() {
                 "succeed" => {
                     let first = poll.data.video_list.first()
