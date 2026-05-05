@@ -71,9 +71,24 @@ pub struct WriterConfig {
     /// Pollo AI API キー (env: POLLO_API_KEY) — 代替画像プロバイダ
     #[serde(default = "env_pollo_key")]
     pub pollo_api_key: Option<String>,
-    /// NVIDIA Build API キー (env: NVIDIA_API_KEY) — 本文挿入画像 (low quality) 用
+    /// NVIDIA Build API キー (env: NVIDIA_API_KEY) — 本文挿入画像 (low quality) 用フォールバック
     #[serde(default = "env_nvidia_key")]
     pub nvidia_api_key: Option<String>,
+    /// Google Gemini API キー (env: GEMINI_API_KEY) — Nano Banana 2 (gemini-3.1-flash-image-preview) で本文挿入画像を生成
+    #[serde(default = "env_gemini_key")]
+    pub gemini_api_key: Option<String>,
+    /// Gemini 画像モデル ID。デフォルトは Nano Banana 2 (gemini-3.1-flash-image-preview)
+    #[serde(default = "default_gemini_image_model")]
+    pub gemini_image_model: String,
+    /// Gemini 画像のアスペクト比 (例: "16:9", "1:1", "9:16")
+    #[serde(default = "default_gemini_aspect_ratio")]
+    pub gemini_aspect_ratio: String,
+    /// Gemini 画像の解像度 ("512", "1K", "2K", "4K")
+    #[serde(default = "default_gemini_image_size")]
+    pub gemini_image_size: String,
+    /// Gemini Thinking Level ("minimal" | "low" | "medium" | "high")
+    #[serde(default = "default_gemini_thinking_level")]
+    pub gemini_thinking_level: String,
     /// 画像プロバイダ: "pollo" | "openai" (default: pollo if key set, else openai)
     #[serde(default = "default_image_provider")]
     pub image_provider: String,
@@ -110,6 +125,11 @@ impl Default for WriterConfig {
             openai_api_key: env_openai_key(),
             pollo_api_key: env_pollo_key(),
             nvidia_api_key: env_nvidia_key(),
+            gemini_api_key: env_gemini_key(),
+            gemini_image_model: default_gemini_image_model(),
+            gemini_aspect_ratio: default_gemini_aspect_ratio(),
+            gemini_image_size: default_gemini_image_size(),
+            gemini_thinking_level: default_gemini_thinking_level(),
             image_provider: default_image_provider(),
             opus_model: default_opus_model(),
             haiku_model: default_haiku_model(),
@@ -214,6 +234,16 @@ fn env_anthropic_key() -> Option<String> { std::env::var("ANTHROPIC_API_KEY").ok
 fn env_openai_key() -> Option<String> { std::env::var("OPENAI_API_KEY").ok() }
 fn env_pollo_key() -> Option<String> { std::env::var("POLLO_API_KEY").ok() }
 fn env_nvidia_key() -> Option<String> { std::env::var("NVIDIA_API_KEY").ok() }
+fn env_gemini_key() -> Option<String> {
+    // GEMINI_API_KEY を優先、未設定なら GOOGLE_API_KEY をフォールバックで参照
+    std::env::var("GEMINI_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+}
+fn default_gemini_image_model() -> String { "gemini-3.1-flash-image-preview".into() }
+fn default_gemini_aspect_ratio() -> String { "16:9".into() }
+fn default_gemini_image_size() -> String { "1K".into() }
+fn default_gemini_thinking_level() -> String { "high".into() }
 fn default_image_provider() -> String { "pollo".into() }
 fn env_x_api_key() -> Option<String> { std::env::var("X_API_KEY").ok() }
 fn env_x_api_secret() -> Option<String> { std::env::var("X_API_SECRET").ok() }
@@ -287,6 +317,7 @@ impl Config {
         if cfg.writer.openai_api_key.is_none() { cfg.writer.openai_api_key = env_openai_key(); }
         if cfg.writer.pollo_api_key.is_none() { cfg.writer.pollo_api_key = env_pollo_key(); }
         if cfg.writer.nvidia_api_key.is_none() { cfg.writer.nvidia_api_key = env_nvidia_key(); }
+        if cfg.writer.gemini_api_key.is_none() { cfg.writer.gemini_api_key = env_gemini_key(); }
         if cfg.publish.x_api_key.is_none() { cfg.publish.x_api_key = env_x_api_key(); }
         if cfg.publish.x_api_secret.is_none() { cfg.publish.x_api_secret = env_x_api_secret(); }
         if cfg.publish.x_access_token.is_none() { cfg.publish.x_access_token = env_x_access_token(); }
