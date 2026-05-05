@@ -69,6 +69,20 @@ default = []
 # `cargo build --features tui` で有効化。`note-auto tui` サブコマンドが利用可能になる。
 tui = ["dep:ratatui"]
 
+# AF3 (Phase 3 v0.9.0): criterion bench harness。将来の perf 改善時の計測基盤。
+# 通常 CI では走らせず (cargo bench は時間とコストが大きい)、手動実行 or
+# .github/workflows/bench.yml の workflow_dispatch から起動する設計。
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "scoring"
+harness = false
+
+[[bench]]
+name = "json_parse"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"            # thin → fat: クロスクレート inlining を最大化
