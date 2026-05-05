@@ -54,8 +54,17 @@ pub struct ImageAsset {
 }
 
 /// 共通 HTTP クライアント (AI 用 — タイムアウト長め)
+///
+/// H1 (panic=abort safety): expect() を `unwrap_or_else` + `tracing::warn` で代替。
+/// `util::http_client_long()` は `LazyLock<reqwest::Client>` の `clone()` ラッパなので
+/// 現実的にはエラーは発生しないが、panic=abort 環境で予防的に fallback を用意:
+/// builder error 時は `reqwest::Client::new()` でデフォルト client を返し、`tracing::warn!`
+/// でエラーを記録する（静かな失敗を避ける）。API シグネチャは無変更。
 pub fn http_client() -> reqwest::Client {
-    crate::util::http_client_long().expect("reqwest client")
+    crate::util::http_client_long().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "http_client_long() failed, falling back to default Client");
+        reqwest::Client::new()
+    })
 }
 
 /// 今日の日付を JST (Asia/Tokyo) で "YYYY-MM-DD (曜日)" 形式で返す。
