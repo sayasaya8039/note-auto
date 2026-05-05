@@ -124,7 +124,19 @@ async fn main() -> Result<()> {
         force_ascii: cli.ascii,
         color: cli.color,
     });
-    logging::init_with(&theme);
+
+    // W7-D' (v0.9.0): main 関数冒頭での `logging::init_with(&theme)` を**削除**。
+    //
+    // v0.7.7〜v0.8.1 では起動時 stderr layer を tracing-subscriber::try_init() で固定していたが、
+    // この後 IndicatifBackend::new で呼ばれる `init_with_progress(&theme, multi)` が
+    // 二重初期化失敗 (try_init は最初の subscriber が勝つ) で W7-D の MultiProgress::suspend
+    // 連動 layer が active 化されない silent failure を起こしていた。
+    //
+    // 解決: subscriber 初期化責務を **backend / 各 subcommand に委譲**:
+    //   - PipelineProgress::new(theme) を作るパス (Run/Once/FetchTrends/Publish/Daemon)
+    //     → IndicatifBackend::new で `init_with_progress` が active に呼ばれる
+    //   - PipelineProgress を作らないパス (Notify/XTest/Write/Tui)
+    //     → match arm 冒頭で `logging::init_with(&theme)` を個別に呼ぶ (silent drop 回避)
 
     // --category 指定時は --config を上書き
     let config_path = match cli.category.as_deref() {
@@ -135,6 +147,7 @@ async fn main() -> Result<()> {
 
     let mut cfg = config::Config::load(&config_path)?;
     display::print_banner(&theme, env!("CARGO_PKG_VERSION"));
+    // 注: このイベントは subscriber 初期化前なので silent drop。banner で代替表示済。
     tracing::info!("note-auto v{} 起動", env!("CARGO_PKG_VERSION"));
 
     match cli.command {
@@ -159,6 +172,8 @@ async fn main() -> Result<()> {
             display::print_check(&theme, &format!("{} ({}件)", out_path.display(), selected.len()));
         }
         Command::Write { from, out, limit, dry_run } => {
+            // W7-D': PipelineProgress を作らないコマンドは個別に logging 初期化
+            logging::init_with(&theme);
             if dry_run { cfg.writer.dry_run = true; }
             let txt = std::fs::read_to_string(&from)
                 .with_context(|| format!("read {}", from.display()))?;
@@ -237,6 +252,8 @@ async fn main() -> Result<()> {
             ));
         }
         Command::Notify { message } => {
+            // W7-D': PipelineProgress を作らないコマンドは個別に logging 初期化
+            logging::init_with(&theme);
             let summary = publish::RunSummary {
                 date: chrono::Local::now().format("%Y-%m-%d").to_string(),
                 articles: vec![publish::PublishResult {
@@ -255,6 +272,8 @@ async fn main() -> Result<()> {
             display::print_check(&theme, "Slack Webhook に送信");
         }
         Command::XTest { message } => {
+            // W7-D': PipelineProgress を作らないコマンドは個別に logging 初期化
+            logging::init_with(&theme);
             let url = publish::x_post::post_text(&cfg, &message).await?;
             display::print_check(&theme, &format!("X 投稿完了: {}", url));
         }
@@ -273,6 +292,11 @@ async fn main() -> Result<()> {
         }
         #[cfg(feature = "tui")]
         Command::Tui { attach_daemon } => {
+            // W7-D': TUI モードは alt screen に入る前に logging を初期化 (TuiBackend は
+            // tracing を直接消費しないため stderr 直書き layer のままで OK、ただし alt
+            // screen 中の出力は混乱するため AppEvent::Log への wire 経由で取り込む方針は
+            // 別 PR で。本 PR では init_with(&theme) で subscriber を起動状態にする)
+            logging::init_with(&theme);
             // TUI モードでは banner / tracing を抑止 (alt screen に干渉)
             // attach_daemon=true: cron daemon が実行中の状態で起動 → .note-auto.lock を観察
             //   現状は起動時に lock の有無を log に流す最小実装。
