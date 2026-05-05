@@ -245,6 +245,11 @@ enum AppEvent {
     Key(KeyEvent),
     Tick,
     Pipeline(PipelineUpdate),
+    /// W7-D: tracing イベントを TUI Logs ペインに反映するためのバリアント。
+    /// 本 PR-N では受信側 (push_log への forwarding) のみ実装、subscriber 側の発火経路
+    /// (`TuiTracingLayer` 等) は次 PR で wire 予定のため、現時点では送信側ゼロで dead_code 警告が出る。
+    #[allow(dead_code)]
+    Log(String),
     WorkerDone(Result<String, String>),
 }
 
@@ -334,6 +339,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::Key(k) => handle_key(&mut app, k, &event_tx).await,
                 AppEvent::Tick => {} // 現状未使用
                 AppEvent::Pipeline(upd) => app.apply_update(upd),
+                AppEvent::Log(line) => app.push_log(line),
                 AppEvent::WorkerDone(res) => {
                     app.running = false;
                     match res {
