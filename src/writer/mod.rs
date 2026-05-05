@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -31,22 +32,37 @@ pub struct WrittenArticle {
     pub source_url: Option<String>,
 }
 
+/// L10: `#[tracing::instrument]` で write stage 経過時間を自動計測。
+#[tracing::instrument(name = "write", skip_all, fields(trend_count = trends.len(), concurrency = cfg.writer.concurrency))]
 pub async fn run(cfg: &Config, trends: &[SelectedTrend], out_dir: &Path) -> Result<Vec<WrittenArticle>> {
     if trends.is_empty() {
         return Err(anyhow!("no trends to write"));
     }
     std::fs::create_dir_all(out_dir)?;
 
-    let tasks = trends.iter().enumerate().map(|(i, t)| {
+    // L9: 記事間並列度を buffer_unordered で制御。
+    //     旧実装は join_all で 21 記事 × 7 API = 147 並列 → Anthropic/Pollo rate limit 直撃。
+    //     cfg.writer.concurrency (default 3) で同時 3 記事に絞る。
+    //     index は task 内で確定済 (write_one の引数として渡す)、
+    //     buffer_unordered の完了順序非依存性は問題にならない。
+    //     stream::iter() に渡す closure は HRTB を要求するため、参照ではなく
+    //     所有値 (Vec<(usize, SelectedTrend)>) を into_iter で消費する。
+    let concurrency = cfg.writer.concurrency.max(1);
+    let owned: Vec<(usize, SelectedTrend)> =
+        trends.iter().cloned().enumerate().collect();
+    let tasks = owned.into_iter().map(|(i, t)| {
         let out = out_dir.to_path_buf();
         let cfg = cfg.clone();
-        let trend = t.clone();
-        async move { write_one(&cfg, &trend, &out, i).await }
+        async move { (i, write_one(&cfg, &t, &out, i).await) }
     });
 
-    let results = join_all(tasks).await;
+    let results: Vec<(usize, Result<WrittenArticle>)> = stream::iter(tasks)
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
     let mut written = Vec::new();
-    for (i, r) in results.into_iter().enumerate() {
+    for (i, r) in results.into_iter() {
         match r {
             Ok(a) => {
                 tracing::info!(slug = %a.slug, chars = a.char_count, "article written");

@@ -116,6 +116,11 @@ pub struct WriterConfig {
     /// dry-run: AI呼び出しをスキップしスタブで代替
     #[serde(default)]
     pub dry_run: bool,
+    /// 記事間並列度（writer::run の buffer_unordered 上限）。
+    /// デフォルト 3 — Anthropic / Pollo の rate limit 安全範囲。
+    /// 21 記事 × 7 API ≒ 147 並列を防ぐ最重要パラメータ。
+    #[serde(default = "default_writer_concurrency")]
+    pub concurrency: usize,
 }
 
 impl Default for WriterConfig {
@@ -139,6 +144,7 @@ impl Default for WriterConfig {
             target_chars: default_article_chars(),
             max_tokens: default_max_tokens(),
             dry_run: false,
+            concurrency: default_writer_concurrency(),
         }
     }
 }
@@ -290,6 +296,8 @@ fn default_dedup() -> f64 { 0.65 }
 fn default_opus_model() -> String { "claude-opus-4-7".into() }
 fn default_haiku_model() -> String { "claude-haiku-4-5-20251001".into() }
 fn default_grok_model() -> String { "grok-3-latest".into() }
+
+fn default_writer_concurrency() -> usize { 3 }
 // pollo モデル名 (例: "openai-gpt-image-2-0" / "openai-gpt-image-1-5" / "gpt-4o" / "dall-e-3")
 // OpenAI 直呼びの場合は "gpt-image-1" / "dall-e-3"
 fn default_image_model() -> String { "openai-gpt-image-2-0".into() }

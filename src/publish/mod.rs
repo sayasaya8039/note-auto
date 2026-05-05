@@ -42,6 +42,9 @@ pub struct RunSummary {
 /// 記事リストを並列公開する (並列度 2、Playwright セッション競合を抑制)。
 ///
 /// articles.to_vec() で HRTB lifetime 問題を回避し、buffered(2) で並列処理。
+///
+/// L10: `#[tracing::instrument]` で publish stage 経過時間を自動計測。
+#[tracing::instrument(name = "publish", skip_all, fields(article_count = articles.len()))]
 pub async fn publish_all(cfg: &Config, articles: &[WrittenArticle]) -> Result<Vec<PublishResult>> {
     if articles.is_empty() {
         return Ok(vec![]);

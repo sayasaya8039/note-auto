@@ -15,6 +15,9 @@ pub struct SelectedTrend {
 /// 2. ソース別ウェイト適用 (`scoring_cfg.source_weights`)
 /// 3. タイトル類似度で重複除去 (`scoring_cfg.dedup_threshold`)
 /// 4. 上位 top 件
+///
+/// L10: `#[tracing::instrument]` で stage 経過時間を自動計測。
+#[tracing::instrument(name = "score", skip_all, fields(input = items.len(), top))]
 pub fn select_top(
     items: Vec<TrendItem>,
     top: usize,
