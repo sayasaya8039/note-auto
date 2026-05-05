@@ -291,6 +291,43 @@ async fn generate_single_image(
     }
 }
 
+/// M3 (SSRF guard, Fix A 簡易): 画像 URL の SSRF 防御。
+///
+/// 旧実装は `u.starts_with("http")` のみで HTTP/HTTPS を許容しており、
+/// `http://169.254.169.254/...` (cloud metadata)、`http://127.0.0.1/...`
+/// (loopback)、`http://10.0.0.0/8` (private) 等への内部 SSRF が可能だった。
+///
+/// Fix A (簡易): HTTPS only + IPv4 private/loopback/link-local block。
+/// DNS resolve + allowlist + TOCTOU 対策は Fix B として v0.9.1 で熟成予定。
+///
+/// 169.254.169.254 (AWS / GCP / Azure metadata service) のような古典的
+/// SSRF 脅威への第一防衛線として機能する。
+fn is_safe_image_url(u: &str) -> bool {
+    use std::net::IpAddr;
+    let url = match url::Url::parse(u) {
+        Ok(x) => x,
+        Err(_) => return false,
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let host = match url.host_str() {
+        Some(h) => h,
+        None => return false,
+    };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return false;
+        }
+        if let IpAddr::V4(v4) = ip {
+            if v4.is_private() || v4.is_link_local() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// ソース公式 URL から画像を最大 max_count 件並行ダウンロード。
 /// 失敗 / 容量不足 / 異常 MIME は None を返し、AI 生成のフォールバックを残す。
 async fn download_source_images(
@@ -299,9 +336,11 @@ async fn download_source_images(
     max_count: usize,
 ) -> Vec<Option<ImageAsset>> {
     use futures::future::join_all;
+    // M3 (SSRF guard): 旧 starts_with("http") を is_safe_image_url() に置換。
+    //                  HTTPS only + IPv4 private/loopback/link-local block。
     let candidates: Vec<&String> = urls
         .iter()
-        .filter(|u| u.starts_with("http"))
+        .filter(|u| is_safe_image_url(u))
         .take(max_count)
         .collect();
     if candidates.is_empty() {
