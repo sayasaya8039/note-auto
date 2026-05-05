@@ -90,6 +90,8 @@ struct App {
     selected_idx: usize,
     list_state: ListState,
     pipeline: [StageState; 5],
+    /// P4: 各 stage の InProgress 開始時刻 (elapsed 計測用、Done/Failed 時に差分計算)
+    stage_started_at: [Option<std::time::Instant>; 5],
     logs: VecDeque<String>,
     focus: Pane,
     /// 実行中フラグ — 二重起動防止
@@ -102,6 +104,8 @@ struct App {
     history_recent: Vec<String>,
     /// W7-C: theme (border_type 切替に使用)
     theme: Theme,
+    /// P4: ヘルプオーバーレイ表示中 (`?` キーでトグル)
+    help_overlay: bool,
 }
 
 impl App {
@@ -132,6 +136,7 @@ impl App {
                 StageState::Pending,
                 StageState::Pending,
             ],
+            stage_started_at: [None, None, None, None, None],
             logs: VecDeque::with_capacity(1000),
             focus: Pane::Sidebar,
             running: false,
@@ -139,6 +144,7 @@ impl App {
             last_msg: None,
             history_recent,
             theme,
+            help_overlay: false,
         }
     }
 
@@ -174,16 +180,37 @@ impl App {
     fn apply_update(&mut self, upd: PipelineUpdate) {
         match upd {
             PipelineUpdate::StageStart { stage, msg } => {
-                self.pipeline[stage as usize] = StageState::InProgress(msg.clone());
+                let i = stage as usize;
+                self.pipeline[i] = StageState::InProgress(msg.clone());
+                // P4: stage 開始時刻を記録 (elapsed 計測用)
+                self.stage_started_at[i] = Some(std::time::Instant::now());
                 self.push_log(format!("→ [{}] {}", stage.label(), msg));
             }
             PipelineUpdate::StageDone { stage, msg } => {
-                self.pipeline[stage as usize] = StageState::Done(msg.clone());
-                self.push_log(format!("✓ [{}] {}", stage.label(), msg));
+                let i = stage as usize;
+                let elapsed_str = self.stage_started_at[i]
+                    .map(|t| format_elapsed(t.elapsed()))
+                    .unwrap_or_default();
+                let combined = if elapsed_str.is_empty() {
+                    msg.clone()
+                } else {
+                    format!("{msg}  ({elapsed_str})")
+                };
+                self.pipeline[i] = StageState::Done(combined.clone());
+                self.push_log(format!("✓ [{}] {}", stage.label(), combined));
             }
             PipelineUpdate::StageFail { stage, err } => {
-                self.pipeline[stage as usize] = StageState::Failed(err.clone());
-                self.push_log(format!("✗ [{}] {}", stage.label(), err));
+                let i = stage as usize;
+                let elapsed_str = self.stage_started_at[i]
+                    .map(|t| format_elapsed(t.elapsed()))
+                    .unwrap_or_default();
+                let combined = if elapsed_str.is_empty() {
+                    err.clone()
+                } else {
+                    format!("{err}  ({elapsed_str})")
+                };
+                self.pipeline[i] = StageState::Failed(combined.clone());
+                self.push_log(format!("✗ [{}] {}", stage.label(), combined));
             }
             PipelineUpdate::Finished => {
                 self.running = false;
@@ -196,6 +223,21 @@ impl App {
         for s in &mut self.pipeline {
             *s = StageState::Pending;
         }
+        self.stage_started_at = [None, None, None, None, None];
+    }
+}
+
+/// P4: Duration を人間向け短縮表示 ("1.2s" / "234ms" / "45µs")
+fn format_elapsed(d: std::time::Duration) -> String {
+    let nanos = d.as_nanos();
+    if nanos >= 1_000_000_000 {
+        format!("{:.1}s", d.as_secs_f64())
+    } else if nanos >= 1_000_000 {
+        format!("{}ms", d.as_millis())
+    } else if nanos >= 1_000 {
+        format!("{}µs", nanos / 1_000)
+    } else {
+        format!("{nanos}ns")
     }
 }
 
@@ -317,7 +359,34 @@ async fn handle_key(
     k: KeyEvent,
     event_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
+    use ratatui::crossterm::event::KeyModifiers;
+
+    // P4: ヘルプオーバーレイ表示中はほぼ全キー無効化、`?`/`Esc`/`q` のみ受け付ける
+    if app.help_overlay {
+        match k.code {
+            KeyCode::Char('?')
+            | KeyCode::Char('q')
+            | KeyCode::Esc
+            | KeyCode::Enter => {
+                app.help_overlay = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // P4: Ctrl+L で Logs ペインクリア (Bash の clear と同じセマンティクス)
+    if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('l') | KeyCode::Char('L')) {
+        app.logs.clear();
+        app.push_log("(Logs cleared)".to_string());
+        return;
+    }
+
     match k.code {
+        // P4: ? でヘルプオーバーレイ
+        KeyCode::Char('?') => {
+            app.help_overlay = true;
+        }
         KeyCode::Char('q') | KeyCode::Esc => {
             if !app.running {
                 app.quit = true;
@@ -445,23 +514,95 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     render_pipeline(f, right[0], app);
     render_logs(f, right[1], app);
 
-    // Status bar
+    // Status bar (P4: ?Help / Ctrl+L Clear-logs を追加)
     let status = Paragraph::new(Line::from(vec![
         Span::styled("j/k", Style::default().fg(ACCENT)),
-        Span::styled(" Move   ", Style::default().fg(SECONDARY)),
+        Span::styled(" Move  ", Style::default().fg(SECONDARY)),
         Span::styled("Enter", Style::default().fg(ACCENT)),
-        Span::styled(" Run   ", Style::default().fg(SECONDARY)),
+        Span::styled(" Run  ", Style::default().fg(SECONDARY)),
         Span::styled("Tab", Style::default().fg(ACCENT)),
-        Span::styled(" Pane   ", Style::default().fg(SECONDARY)),
+        Span::styled(" Pane  ", Style::default().fg(SECONDARY)),
+        Span::styled("?", Style::default().fg(ACCENT)),
+        Span::styled(" Help  ", Style::default().fg(SECONDARY)),
+        Span::styled("Ctrl-L", Style::default().fg(ACCENT)),
+        Span::styled(" ClearLog  ", Style::default().fg(SECONDARY)),
         Span::styled("q", Style::default().fg(ACCENT)),
         Span::styled(" Quit", Style::default().fg(SECONDARY)),
-        Span::raw("   "),
+        Span::raw("  "),
         Span::styled(
             if app.running { "● running" } else { "○ idle" },
             Style::default().fg(if app.running { SUCCESS } else { SECONDARY }),
         ),
     ]));
     f.render_widget(status, outer[2]);
+
+    // P4: ヘルプオーバーレイ (Toggle: `?`)
+    if app.help_overlay {
+        render_help_overlay(f, app);
+    }
+}
+
+/// P4: 中央に help モーダルを描画 (Clear で背景を消してから Block + Paragraph を重ねる)
+fn render_help_overlay(f: &mut ratatui::Frame, app: &App) {
+    use ratatui::widgets::Clear;
+
+    let area = f.area();
+    let modal_w = 56u16.min(area.width.saturating_sub(4));
+    let modal_h = 16u16.min(area.height.saturating_sub(4));
+    let modal_x = area.x + (area.width.saturating_sub(modal_w)) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+
+    f.render_widget(Clear, modal_area); // 背景クリア
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            " note-auto TUI — Help ",
+            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  j / ↓     ", Style::default().fg(ACCENT)),
+            Span::raw("カテゴリを下へ"),
+        ]),
+        Line::from(vec![
+            Span::styled("  k / ↑     ", Style::default().fg(ACCENT)),
+            Span::raw("カテゴリを上へ"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", Style::default().fg(ACCENT)),
+            Span::raw("選択カテゴリで pipeline 実行"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab       ", Style::default().fg(ACCENT)),
+            Span::raw("ペイン切替 (Sidebar↔Pipeline↔Logs)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl-L    ", Style::default().fg(ACCENT)),
+            Span::raw("Logs ペインクリア"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?         ", Style::default().fg(ACCENT)),
+            Span::raw("このヘルプを toggle"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Esc   ", Style::default().fg(ACCENT)),
+            Span::raw("終了 (実行中はガード)"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  press ? / Enter / q / Esc to close",
+            Style::default().fg(SECONDARY),
+        )),
+    ];
+
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_type(border_type_for(&app.theme))
+        .border_style(Style::default().fg(ACCENT));
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, modal_area);
 }
 
 fn render_sidebar(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
