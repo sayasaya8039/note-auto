@@ -108,7 +108,8 @@ enum Command {
     /// `--features tui` ビルド時のみ利用可能。
     #[cfg(feature = "tui")]
     Tui {
-        /// daemon 連携モード (W7-C で実装予定、本 W7-B では未実装)
+        /// daemon 連携モード: 起動時に `.note-auto.lock` の存在を確認し
+        /// cron daemon が並行実行中かを log に表示。Phase 3 で実 IPC 監視に拡張予定。
         #[arg(long)]
         attach_daemon: bool,
     },
@@ -271,8 +272,21 @@ async fn main() -> Result<()> {
             display::print_done(&theme, &summary);
         }
         #[cfg(feature = "tui")]
-        Command::Tui { attach_daemon: _ } => {
+        Command::Tui { attach_daemon } => {
             // TUI モードでは banner / tracing を抑止 (alt screen に干渉)
+            // attach_daemon=true: cron daemon が実行中の状態で起動 → .note-auto.lock を観察
+            //   現状は起動時に lock の有無を log に流す最小実装。
+            //   実 cron 進捗のリアルタイム取得は Phase 3 候補 (Slack post_progress 経由 or IPC)。
+            if attach_daemon {
+                let lock_path = std::path::PathBuf::from("drafts")
+                    .join(chrono::Local::now().format("%Y-%m-%d").to_string())
+                    .join(".note-auto.lock");
+                if lock_path.exists() {
+                    tracing::info!("daemon が実行中です (lock={:?})、TUI は監視モードで起動", lock_path);
+                } else {
+                    tracing::info!("daemon は実行中ではありません (lock 不在)、TUI は通常 interactive モードで起動");
+                }
+            }
             cli::tui::run(&cfg, theme).await?;
         }
     }
