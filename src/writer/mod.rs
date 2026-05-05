@@ -166,7 +166,8 @@ async fn write_one(
         crate::util::yaml_escape(&trend.item.url.clone().unwrap_or_default()),
         draft.char_count,
         image_path.as_ref()
-            .map(|p| format!("image: \"{}\"\n", p.file_name().unwrap().to_string_lossy()))
+            .and_then(|p| p.file_name()).map(|n| format!("image: \"{}\"
+", n.to_string_lossy()))
             .unwrap_or_default(),
     );
 
