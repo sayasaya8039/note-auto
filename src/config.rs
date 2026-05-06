@@ -14,6 +14,22 @@ pub struct Config {
     pub publish: PublishConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
+    /// M3-C (v0.9.2): SSRF allowlist + TOCTOU 完全対策のための security 設定。
+    /// `[security] image_url_allowlist = ["konbini.com", "*.cdn.example.com"]`
+    /// 形式で指定可能。empty (default) は M3-B 既存挙動 (全 IPv4 private 以外許可) に fallback。
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// M3-C: SSRF defense-in-depth 設定。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SecurityConfig {
+    /// 画像 URL の domain allowlist。
+    /// - exact match: `"konbini.com"` → ホストが完全一致
+    /// - wildcard suffix: `"*.cdn.example.com"` → `.cdn.example.com` で終わるホスト
+    /// - empty Vec: allowlist 無効、M3-B IP リテラル + DNS resolve check のみで判定
+    #[serde(default)]
+    pub image_url_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

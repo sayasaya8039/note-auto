@@ -194,60 +194,122 @@ pub async fn fetch_bytes_with_retry(
     Ok(bytes.to_vec())
 }
 
-/// M3-B (Fix B 熟成): hostname を DNS resolve し、得られた全 IP に対して
-/// loopback / private / link-local をチェックする。1 つでも内部 IP が
-/// 含まれていれば `false` を返す (**DNS rebinding 対策の第一歩**)。
+/// M3-C (v0.9.2 TOCTOU 完全対策 + allowlist): URL を SSRF 防御チェックし、
+/// safe と判定された場合は **resolve pin した secure reqwest::Client** を返す。
 ///
-/// IPv4 + IPv6 両対応:
-/// - IPv4: loopback / unspecified / private (10/8, 172.16/12, 192.168/16) / link-local (169.254/16) を block
-/// - IPv6: loopback (::1) / unspecified (::) / ULA (fc00::/7) / link-local (fe80::/10) を block
+/// ## 防御層 (defense-in-depth 完成版)
+/// - L1 (M3 Fix A): scheme==https + IPv4 リテラル private/loopback/link-local block
+/// - L2 (M3-B): DNS resolve 後の全 IP に対する safety check
+/// - L3 (M3-C): allowlist 適用 (空時は M3-B 動作 fallback)
+/// - L4 (M3-C): resolve pin で TOCTOU race 排除 — `ClientBuilder::resolve(host, addr)` で固定
+/// - L5 (M3-C): cross-domain redirect block — `redirect::Policy::custom` で同 hostname のみ follow
 ///
-/// DNS 解決失敗 (host が unreachable) → false
-/// 空 iterator (resolve したが結果ゼロ) → false
-///
-/// ## TOCTOU 注意
-/// 本実装は「DNS 解決時点の IP が safe か」のみ保証する。
-/// 真の TOCTOU 対策 (resolve 結果を request 時に固定する) には
-/// `reqwest::Client::resolve` override が必要で、v0.9.2+ で熟成予定。
-pub async fn resolve_and_check_safe_ip(host: &str) -> bool {
-    use std::net::IpAddr;
+/// ## 戻り値
+/// - `Some(client)`: URL は safe、返された client で fetch すれば TOCTOU race なし
+/// - `None`: URL は unsafe (scheme / allowlist / IP / resolve いずれかで deny)
+pub async fn check_and_pin_image_client(
+    url_str: &str,
+    allowlist: &[String],
+) -> Option<reqwest::Client> {
+    use std::net::{IpAddr, SocketAddr};
     use tokio::net::lookup_host;
 
-    // tokio::net::lookup_host は "host:port" 形式を要求
-    let target = format!("{host}:443");
-    let addrs = match lookup_host(&target).await {
-        Ok(it) => it,
-        Err(_) => return false,
-    };
+    let parsed = url::Url::parse(url_str).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
 
-    let mut any = false;
-    for addr in addrs {
-        any = true;
-        let ip = addr.ip();
-        if ip.is_loopback() || ip.is_unspecified() {
-            return false;
-        }
-        match ip {
-            IpAddr::V4(v4) => {
-                if v4.is_private() || v4.is_link_local() {
-                    return false;
-                }
-            }
-            IpAddr::V6(v6) => {
-                let seg = v6.segments();
-                // ULA (fc00::/7): 最上位 7 bit が 1111110
-                if (seg[0] & 0xfe00) == 0xfc00 {
-                    return false;
-                }
-                // link-local (fe80::/10): 最上位 10 bit が 1111111010
-                if (seg[0] & 0xffc0) == 0xfe80 {
-                    return false;
-                }
-            }
-        }
+    // L3: allowlist が指定されていれば match 必須 (空なら skip)
+    if !allowlist.is_empty() && !matches_allowlist(&host, allowlist) {
+        return None;
     }
 
-    any
+    // L1+L2: IP リテラル or DNS resolve + IP safety check + 1 IP を pin 用に決定
+    let pinned_ip: IpAddr = if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_unsafe_ip(ip) {
+            return None;
+        }
+        ip
+    } else {
+        let target = format!("{host}:{port}");
+        let addrs = lookup_host(&target).await.ok()?;
+        let mut chosen: Option<IpAddr> = None;
+        for addr in addrs {
+            let ip = addr.ip();
+            if is_unsafe_ip(ip) {
+                return None; // 1 つでも unsafe なら全否定 (DNS rebinding 抑止)
+            }
+            if chosen.is_none() {
+                chosen = Some(ip);
+            }
+        }
+        chosen?
+    };
+
+    // L4 + L5: resolve pin した secure client を build
+    let socket = SocketAddr::new(pinned_ip, port);
+    let host_for_redirect = host.clone();
+    reqwest::Client::builder()
+        .user_agent("note-auto/0.9 (secure-image)")
+        .timeout(std::time::Duration::from_secs(30))
+        .gzip(true)
+        .resolve(&host, socket)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            // L5: cross-domain redirect block。同 host のみ follow を許可。
+            // (resolve pin は構築時の host のみに効くため、cross-domain redirect は
+            //  別 host = 別 IP となり TOCTOU race の温床になる)
+            let next_host = attempt.url().host_str().unwrap_or("");
+            if next_host == host_for_redirect {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .ok()
+}
+
+/// 内部 IP (loopback / unspecified / private / link-local / ULA) 判定 (M3-B/M3-C 共通)。
+fn is_unsafe_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // ULA (fc00::/7)
+            if (seg[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // link-local (fe80::/10)
+            if (seg[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            false
+        }
+    }
+}
+
+/// host が allowlist のいずれかにマッチするか判定 (M3-C)。
+/// - exact match (`"example.com"` ↔ `host == "example.com"`)
+/// - wildcard suffix (`"*.cdn.example.com"` ↔ `host` が `.cdn.example.com` で終わる、
+///   または `cdn.example.com` 完全一致でも true)
+fn matches_allowlist(host: &str, allowlist: &[String]) -> bool {
+    for pattern in allowlist {
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            let needle = format!(".{suffix}");
+            if host.ends_with(&needle) || host == suffix {
+                return true;
+            }
+        } else if host == pattern.as_str() {
+            return true;
+        }
+    }
+    false
 }
 
 /// 指数バックオフ + jitter (1/4 of base) ms。最大 30s で頭打ち。
@@ -266,4 +328,57 @@ pub fn yaml_escape(s: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_exact_match() {
+        let list = vec!["konbini.com".to_string()];
+        assert!(matches_allowlist("konbini.com", &list));
+        assert!(!matches_allowlist("evil.com", &list));
+        assert!(!matches_allowlist("sub.konbini.com", &list));
+    }
+
+    #[test]
+    fn allowlist_wildcard_match() {
+        let list = vec!["*.cdn.example.com".to_string()];
+        assert!(matches_allowlist("img.cdn.example.com", &list));
+        assert!(matches_allowlist("a.b.cdn.example.com", &list));
+        assert!(matches_allowlist("cdn.example.com", &list));
+        assert!(!matches_allowlist("cdn.example.org", &list));
+        assert!(!matches_allowlist("evil-cdn.example.com", &list));
+    }
+
+    #[test]
+    fn allowlist_empty_returns_false() {
+        let list: Vec<String> = vec![];
+        assert!(!matches_allowlist("anything.com", &list));
+    }
+
+    #[test]
+    fn unsafe_ip_v4() {
+        use std::net::{IpAddr, Ipv4Addr};
+        assert!(is_unsafe_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_unsafe_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_unsafe_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(is_unsafe_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        assert!(!is_unsafe_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn unsafe_ip_v6() {
+        use std::net::{IpAddr, Ipv6Addr};
+        assert!(is_unsafe_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfc00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(is_unsafe_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_unsafe_ip(IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0, 1
+        ))));
+    }
 }
