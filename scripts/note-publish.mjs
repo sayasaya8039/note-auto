@@ -471,10 +471,51 @@ async function run(input) {
       await page.waitForURL(/note\.com\/[^/]+\/n\//, { timeout: 60000 });
       return { status: "published", url: page.url() };
     } else {
-      // 下書き保存ボタンを明示クリック (自動保存だが念のため)
-      await page.getByRole("button", { name: "下書き保存" }).click({ timeout: 10000 }).catch(() => {});
+      // Fix-D: 下書き保存ボタンを明示クリック
+      // 旧実装は .catch(() => {}) で全エラーを握りつぶし、button 不在でも
+      // status:"draft" を返して draft 失敗を成功と詐称していた。
+      // selector 候補を 3 段で試し、すべて失敗した場合は status:"error"。
+      const draftSelectors = [
+        () => page.getByRole("button", { name: /^下書き保存$/ }),
+        () => page.getByRole("button", { name: /下書き(保存|を保存)/ }),
+        () => page.locator('button[aria-label*="下書き"]').first(),
+      ];
+      let clicked = false;
+      let lastErr;
+      for (const sel of draftSelectors) {
+        try {
+          await sel().click({ timeout: 5000 });
+          clicked = true;
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (!clicked) {
+        // Fix-D: 失敗時 screenshot を保存 (Fix-S 同等の痕跡確保)
+        try {
+          const ts = new Date().toISOString().replace(/[:.]/g, "-");
+          const shotDir = resolve(input.cookie_dir, "screenshots");
+          mkdirSync(shotDir, { recursive: true });
+          const shotPath = join(shotDir, `${ts}-draft-save-fail.png`);
+          await page.screenshot({ path: shotPath, fullPage: true });
+          console.error(`[publish] draft save button not found, screenshot=${shotPath}`);
+        } catch {}
+        return {
+          status: "error",
+          error: `下書き保存 button not found (3 selectors tried): ${lastErr?.message ?? "unknown"}`,
+        };
+      }
       await page.waitForTimeout(2000);
-      return { status: "draft", url: page.url() };
+      const url = page.url();
+      // Fix-D: URL が編集画面 (/edit/<id> or /notes/new) を示すことを検証
+      if (!/\/edit\//.test(url) && !/\/notes\/new/.test(url)) {
+        return {
+          status: "error",
+          error: `unexpected URL after draft save: ${url}`,
+        };
+      }
+      return { status: "draft", url };
     }
   } catch (e) {
     return { status: "error", error: String(e?.message || e) };
