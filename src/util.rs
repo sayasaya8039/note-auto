@@ -194,6 +194,62 @@ pub async fn fetch_bytes_with_retry(
     Ok(bytes.to_vec())
 }
 
+/// M3-B (Fix B 熟成): hostname を DNS resolve し、得られた全 IP に対して
+/// loopback / private / link-local をチェックする。1 つでも内部 IP が
+/// 含まれていれば `false` を返す (**DNS rebinding 対策の第一歩**)。
+///
+/// IPv4 + IPv6 両対応:
+/// - IPv4: loopback / unspecified / private (10/8, 172.16/12, 192.168/16) / link-local (169.254/16) を block
+/// - IPv6: loopback (::1) / unspecified (::) / ULA (fc00::/7) / link-local (fe80::/10) を block
+///
+/// DNS 解決失敗 (host が unreachable) → false
+/// 空 iterator (resolve したが結果ゼロ) → false
+///
+/// ## TOCTOU 注意
+/// 本実装は「DNS 解決時点の IP が safe か」のみ保証する。
+/// 真の TOCTOU 対策 (resolve 結果を request 時に固定する) には
+/// `reqwest::Client::resolve` override が必要で、v0.9.2+ で熟成予定。
+pub async fn resolve_and_check_safe_ip(host: &str) -> bool {
+    use std::net::IpAddr;
+    use tokio::net::lookup_host;
+
+    // tokio::net::lookup_host は "host:port" 形式を要求
+    let target = format!("{host}:443");
+    let addrs = match lookup_host(&target).await {
+        Ok(it) => it,
+        Err(_) => return false,
+    };
+
+    let mut any = false;
+    for addr in addrs {
+        any = true;
+        let ip = addr.ip();
+        if ip.is_loopback() || ip.is_unspecified() {
+            return false;
+        }
+        match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_private() || v4.is_link_local() {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                let seg = v6.segments();
+                // ULA (fc00::/7): 最上位 7 bit が 1111110
+                if (seg[0] & 0xfe00) == 0xfc00 {
+                    return false;
+                }
+                // link-local (fe80::/10): 最上位 10 bit が 1111111010
+                if (seg[0] & 0xffc0) == 0xfe80 {
+                    return false;
+                }
+            }
+        }
+    }
+
+    any
+}
+
 /// 指数バックオフ + jitter (1/4 of base) ms。最大 30s で頭打ち。
 fn backoff_ms(attempt: usize) -> u64 {
     use rand::Rng;
