@@ -25,21 +25,22 @@ mod writer;
 #[derive(Parser)]
 #[command(name = "note-auto", version, about = "note記事トレンドドリブン自動生成")]
 struct Cli {
-    #[arg(long, default_value = "config.toml", global = true)]
+    /// 設定ファイルパス。--category 指定時は configs/<name>.toml で上書きされる。
+    #[arg(long, default_value = "config.toml", global = true, help_heading = "Global Options")]
     config: PathBuf,
 
     /// `note|x|google|hn|konbini|hyakkin|gnews|all` のいずれかを指定すると
     /// `--config configs/<name>.toml` を上書き設定する (`all` のみルート `config.toml`)。
     /// bat shim から呼ばれるためのショートカット。明示 `--config` 指定があれば本フラグが優先。
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global Options")]
     category: Option<String>,
 
     /// Unicode 罫線 / glyph を ASCII にフォールバック。旧 cmd.exe や非 UTF-8 環境向け。
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Display Options")]
     ascii: bool,
 
     /// 色付け制御: `auto` (TTY 検出 + NO_COLOR 尊重) | `always` | `never`
-    #[arg(long, global = true, default_value = "auto", value_parser = display::parse_color_mode)]
+    #[arg(long, global = true, default_value = "auto", value_parser = display::parse_color_mode, help_heading = "Display Options")]
     color: display::ColorMode,
 
     #[command(subcommand)]
