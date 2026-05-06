@@ -33,8 +33,15 @@ pub struct WrittenArticle {
 }
 
 /// L10: `#[tracing::instrument]` で write stage 経過時間を自動計測。
+/// W7-E (v0.9.1): `progress` を渡すと記事完了/失敗時に sub_bar 経由で進捗を可視化する。
+///                None の場合は既存挙動と完全互換。
 #[tracing::instrument(name = "write", skip_all, fields(trend_count = trends.len(), concurrency = cfg.writer.concurrency))]
-pub async fn run(cfg: &Config, trends: &[SelectedTrend], out_dir: &Path) -> Result<Vec<WrittenArticle>> {
+pub async fn run(
+    cfg: &Config,
+    trends: &[SelectedTrend],
+    out_dir: &Path,
+    progress: Option<&crate::display::PipelineProgress>,
+) -> Result<Vec<WrittenArticle>> {
     if trends.is_empty() {
         return Err(anyhow!("no trends to write"));
     }
@@ -66,9 +73,20 @@ pub async fn run(cfg: &Config, trends: &[SelectedTrend], out_dir: &Path) -> Resu
         match r {
             Ok(a) => {
                 tracing::info!(slug = %a.slug, chars = a.char_count, "article written");
+                // W7-E: 各記事の write 完了を sub_bar に反映
+                if let Some(p) = progress {
+                    let bar = p.sub_bar(crate::display::Stage::Write, &a.slug);
+                    bar.done(&format!("{} 字", a.char_count));
+                }
                 written.push(a);
             }
-            Err(e) => tracing::error!(index = i, error = format!("{:#}", e), "article failed"),
+            Err(e) => {
+                tracing::error!(index = i, error = format!("{:#}", e), "article failed");
+                if let Some(p) = progress {
+                    let bar = p.sub_bar(crate::display::Stage::Write, &format!("article#{i}"));
+                    bar.fail(&format!("{:#}", e));
+                }
+            }
         }
     }
     if written.is_empty() {

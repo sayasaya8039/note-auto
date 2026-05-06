@@ -89,7 +89,7 @@ pub async fn execute_cycle_with_progress(
     // 1. fetch
     progress.stage_start(crate::display::Stage::Fetch,
         &format!("{} ソース並列取得中…", source_count));
-    let items = match fetch_all(cfg).await {
+    let items = match fetch_all(cfg, Some(progress)).await {
         Ok(v) => v,
         Err(e) => {
             progress.stage_fail(crate::display::Stage::Fetch, &e.to_string());
@@ -153,7 +153,7 @@ pub async fn execute_cycle_with_progress(
     // 2. write
     progress.stage_start(crate::display::Stage::Write,
         &format!("{} 記事を AI 執筆中…", selected.len()));
-    let articles = writer::run(cfg, &selected, &out_dir).await?;
+    let articles = writer::run(cfg, &selected, &out_dir, Some(progress)).await?;
     let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
     progress.stage_done(crate::display::Stage::Write,
         &format!("{} 記事 / {} 字", articles.len(), total_chars));
@@ -168,7 +168,7 @@ pub async fn execute_cycle_with_progress(
     // 3. publish
     progress.stage_start(crate::display::Stage::Publish,
         &format!("{} 記事を note + X に投稿中…", articles.len()));
-    let publish_results: Vec<PublishResult> = publish_all(cfg, &articles).await?;
+    let publish_results: Vec<PublishResult> = publish_all(cfg, &articles, Some(progress)).await?;
     let duration_secs = start.elapsed().as_secs();
     progress.stage_done(crate::display::Stage::Publish, "完了");
 

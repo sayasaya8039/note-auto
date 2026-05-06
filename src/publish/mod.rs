@@ -44,8 +44,14 @@ pub struct RunSummary {
 /// articles.to_vec() で HRTB lifetime 問題を回避し、buffered(2) で並列処理。
 ///
 /// L10: `#[tracing::instrument]` で publish stage 経過時間を自動計測。
+/// W7-E (v0.9.1): `progress` を渡すと publish 完了時に sub_bar 経由で進捗を可視化。
+///                None の場合は既存挙動と完全互換。
 #[tracing::instrument(name = "publish", skip_all, fields(article_count = articles.len()))]
-pub async fn publish_all(cfg: &Config, articles: &[WrittenArticle]) -> Result<Vec<PublishResult>> {
+pub async fn publish_all(
+    cfg: &Config,
+    articles: &[WrittenArticle],
+    progress: Option<&crate::display::PipelineProgress>,
+) -> Result<Vec<PublishResult>> {
     if articles.is_empty() {
         return Ok(vec![]);
     }
@@ -59,6 +65,22 @@ pub async fn publish_all(cfg: &Config, articles: &[WrittenArticle]) -> Result<Ve
         .buffered(2)
         .collect()
         .await;
+
+    // W7-E: 各記事の publish 結果を sub_bar に反映 (note status / x status 別に done/fail)
+    if let Some(p) = progress {
+        for r in &results {
+            let bar = p.sub_bar(crate::display::Stage::Publish, &r.slug);
+            let success_count = (r.note_status == "published" || r.note_status == "draft") as u8
+                + (r.x_status == "posted") as u8;
+            if r.errors.is_empty() && success_count > 0 {
+                bar.done(&format!("note={}, x={}", r.note_status, r.x_status));
+            } else if !r.errors.is_empty() {
+                bar.fail(&r.errors.join(" / "));
+            } else {
+                bar.done(&format!("skipped (note={}, x={})", r.note_status, r.x_status));
+            }
+        }
+    }
     Ok(results)
 }
 

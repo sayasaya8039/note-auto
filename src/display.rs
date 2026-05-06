@@ -375,6 +375,36 @@ pub trait PipelineBackend: Send + Sync {
     fn stage_fail(&self, stage: Stage, err: &str);
     /// 全 stage 終了処理 (Drop 時にも自動)
     fn finish(&self);
+
+    /// W7-E (v0.9.1): 子 sub-bar (source/article/publish 等) を返す。
+    /// IndicatifBackend は indicatif の子 ProgressBar を作成、TuiBackend / その他は default no-op。
+    /// `label` は表示用ラベル (例: "hn", "<slug>:write", "<slug>:publish-note")。
+    fn sub_bar(&self, _stage: Stage, _label: &str) -> Box<dyn SubBar> {
+        Box::new(NoopSubBar)
+    }
+}
+
+/// W7-E: 子 sub-bar インターフェース。
+/// `Drop` 時に自動 finish するが、明示的に `done` / `fail` で締めるのが推奨。
+pub trait SubBar: Send + Sync {
+    /// メッセージ更新 (進行中の phase 情報等)。
+    /// 現状 W7-E では writer/publish/trends は完了/失敗時のみ sub_bar を駆動するため
+    /// `tick` は未呼出。Phase 4 で writer 内部の細粒度 phase (LLM/画像/save) wire に使う予定。
+    #[allow(dead_code)]
+    fn tick(&self, msg: &str);
+    /// 完了 — ✓ prefix + finish_with_message
+    fn done(&self, msg: &str);
+    /// 失敗 — ✗ prefix + abandon_with_message
+    fn fail(&self, err: &str);
+}
+
+/// no-op SubBar (default backend / TuiBackend で利用)
+pub struct NoopSubBar;
+
+impl SubBar for NoopSubBar {
+    fn tick(&self, _msg: &str) {}
+    fn done(&self, _msg: &str) {}
+    fn fail(&self, _err: &str) {}
 }
 
 /// indicatif::MultiProgress 経由のパイプライン進捗 backend (v0.7.7 互換)。
@@ -466,6 +496,70 @@ impl PipelineBackend for IndicatifBackend {
         }
         let _ = self.multi.clear();
     }
+
+    fn sub_bar(&self, _stage: Stage, label: &str) -> Box<dyn SubBar> {
+        use indicatif::{ProgressBar, ProgressStyle};
+
+        // W7-E: 子 bar は親 stage 直下にインデント表示 ("    └─ <label>")
+        let pb = self.multi.add(ProgressBar::new_spinner());
+        let style = ProgressStyle::with_template("{prefix:<14} {spinner} {wide_msg}")
+            .unwrap()
+            .tick_strings(if self.theme.uses_unicode {
+                &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]
+            } else {
+                &["|", "/", "-", "\\", "OK"]
+            });
+        pb.set_style(style);
+        pb.set_prefix(format!(
+            "  {} {}",
+            dim(&self.theme, if self.theme.uses_unicode { "↳" } else { ">" }),
+            dim(&self.theme, label)
+        ));
+        pb.enable_steady_tick(std::time::Duration::from_millis(120));
+
+        Box::new(IndicatifSubBar {
+            pb,
+            theme: self.theme,
+        })
+    }
+}
+
+/// W7-E: indicatif 子 ProgressBar の SubBar 実装
+pub struct IndicatifSubBar {
+    pb: indicatif::ProgressBar,
+    theme: Theme,
+}
+
+impl SubBar for IndicatifSubBar {
+    /// Phase 4 で writer/publish 内部の phase 進捗 (LLM 呼出 / 画像生成 / save 等) を細粒度
+    /// tick する際に wire 予定。現状 W7-E では done/fail 時にしか sub_bar を駆動しないため未呼出。
+    #[allow(dead_code)]
+    fn tick(&self, msg: &str) {
+        self.pb.set_message(msg.to_string());
+    }
+    fn done(&self, msg: &str) {
+        let g = glyphs(&self.theme);
+        // prefix を ✓ に切替てから finish
+        let current = self.pb.prefix();
+        self.pb.set_prefix(format!(
+            "  {} {}",
+            success(&self.theme, g.check),
+            dim(&self.theme, current.trim_start_matches(|c: char| c.is_whitespace() || c == '↳' || c == '>').trim())
+        ));
+        self.pb.disable_steady_tick();
+        self.pb.finish_with_message(msg.to_string());
+    }
+    fn fail(&self, err: &str) {
+        let g = glyphs(&self.theme);
+        let current = self.pb.prefix();
+        self.pb.set_prefix(format!(
+            "  {} {}",
+            error_color(&self.theme, g.cross),
+            dim(&self.theme, current.trim_start_matches(|c: char| c.is_whitespace() || c == '↳' || c == '>').trim())
+        ));
+        self.pb.disable_steady_tick();
+        self.pb.abandon_with_message(format!("failed: {err}"));
+    }
 }
 
 /// パイプライン進捗 facade。`IndicatifBackend` (default) または将来の `TuiBackend` を保持。
@@ -506,6 +600,12 @@ impl PipelineProgress {
 
     pub fn stage_fail(&self, stage: Stage, err: &str) {
         self.backend.stage_fail(stage, err);
+    }
+
+    /// W7-E: 子 sub-bar (source/article/publish 個別) を取得。
+    /// IndicatifBackend では子 ProgressBar を作成、TuiBackend / その他は no-op。
+    pub fn sub_bar(&self, stage: Stage, label: &str) -> Box<dyn SubBar> {
+        self.backend.sub_bar(stage, label)
     }
 
     pub fn finish(&self) {

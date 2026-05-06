@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
             let progress = display::PipelineProgress::new(theme);
 
             progress.stage_start(display::Stage::Fetch, "全ソース並列取得中…");
-            let items = trends::fetch_all(&cfg).await?;
+            let items = trends::fetch_all(&cfg, Some(&progress)).await?;
             progress.stage_done(display::Stage::Fetch, &format!("{} 件", items.len()));
 
             progress.stage_start(display::Stage::Score, "スコアリング中…");
@@ -183,7 +183,8 @@ async fn main() -> Result<()> {
             let out_dir = out.unwrap_or_else(|| {
                 from.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
             });
-            let written = writer::run(&cfg, &trends, &out_dir).await?;
+            // W7-E: Write コマンドは PipelineProgress を作らないため None で呼ぶ (互換維持)
+            let written = writer::run(&cfg, &trends, &out_dir, None).await?;
             display::print_check(&theme, &format!("{} 記事を出力", written.len()));
             for a in &written {
                 println!("  - {} ({}文字) → {}", a.title, a.char_count, a.md_path.display());
@@ -196,7 +197,7 @@ async fn main() -> Result<()> {
             let progress = display::PipelineProgress::new(theme);
 
             progress.stage_start(display::Stage::Fetch, "全ソース並列取得中…");
-            let items = trends::fetch_all(&cfg).await?;
+            let items = trends::fetch_all(&cfg, Some(&progress)).await?;
             progress.stage_done(display::Stage::Fetch, &format!("{} 件", items.len()));
 
             progress.stage_start(display::Stage::Score, "スコアリング中…");
@@ -208,7 +209,7 @@ async fn main() -> Result<()> {
             tracing::info!(count = selected.len(), "trends selected");
 
             progress.stage_start(display::Stage::Write, "AI 執筆中…");
-            let written = writer::run(&cfg, &selected, &out_dir).await?;
+            let written = writer::run(&cfg, &selected, &out_dir, Some(&progress)).await?;
             progress.stage_done(display::Stage::Write, &format!("{} 記事", written.len()));
             drop(progress);
 
@@ -229,7 +230,7 @@ async fn main() -> Result<()> {
             progress.stage_start(display::Stage::Publish,
                 &format!("{} 記事を note + X へ投稿中…", articles.len()));
             let start = std::time::Instant::now();
-            let results = publish::publish_all(&cfg, &articles).await?;
+            let results = publish::publish_all(&cfg, &articles, Some(&progress)).await?;
             progress.stage_done(display::Stage::Publish, "完了");
 
             let total_chars: usize = articles.iter().map(|a| a.char_count).sum();
