@@ -7,12 +7,23 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use std::sync::LazyLock;
 
 use crate::trends::TrendItem;
 
 const ENDPOINT: &str = "https://news.google.com/rss/search";
 const OG_IMAGE_TIMEOUT_SECS: u64 = 8;
 const OG_IMAGE_MAX_PAR: usize = 5; // 同時 og:image 取得数
+
+/// PERF-4 (v0.9.3): OG image 抽出用 regex を LazyLock で 1 度だけコンパイル。
+/// 旧実装は extract_og_image 呼び出し毎 (= URL 毎) に Regex::new していたため、
+/// OG enrich N 件で N 回コンパイル。固定 pattern なので static 化で µs オーダー削減。
+static OG_IMAGE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?is)<meta[^>]+(?:property|name)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image)["'][^>]*content\s*=\s*["']([^"']+)["']"#,
+    )
+    .expect("OG_IMAGE_RE compile (固定 pattern, ビルド時に必ず通る)")
+});
 
 /// 与えたクエリで Google News RSS を叩き、結果を TrendItem として返す。
 pub async fn fetch_query(
@@ -21,11 +32,9 @@ pub async fn fetch_query(
     query: &str,
     max_items: usize,
 ) -> Result<Vec<TrendItem>> {
-    let url = format!(
-        "{}?q={}&hl=ja&gl=JP&ceid=JP:ja",
-        ENDPOINT,
-        urlencoding::encode(query)
-    );
+    // DEP-1 (v0.9.3): urlencoding crate を撤去し、既存依存の `url` で代用
+    let encoded_query: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    let url = format!("{ENDPOINT}?q={encoded_query}&hl=ja&gl=JP&ceid=JP:ja");
 
     let resp = client
         .get(&url)
@@ -146,12 +155,8 @@ async fn fetch_og_image(client: &reqwest::Client, url: &str) -> Option<String> {
 }
 
 fn extract_og_image(html: &str, base: &url::Url) -> Option<String> {
-    // <meta property="og:image" content="..."> または name="og:image" / "twitter:image"
-    let re = regex::Regex::new(
-        r#"(?is)<meta[^>]+(?:property|name)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image)["'][^>]*content\s*=\s*["']([^"']+)["']"#,
-    )
-    .ok()?;
-    let captures = re.captures(html)?;
+    // PERF-4 (v0.9.3): OG_IMAGE_RE を LazyLock 化済、毎回 Regex::new コストなし
+    let captures = OG_IMAGE_RE.captures(html)?;
     let raw = captures.get(1)?.as_str();
     let abs = base.join(raw).ok()?;
     let s = abs.to_string();
