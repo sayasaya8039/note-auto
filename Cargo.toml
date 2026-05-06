@@ -46,7 +46,7 @@ chrono-tz = "0.10"
 hmac = "0.12"
 sha1 = "0.10"
 rand = "0.8"
-urlencoding = "2"
+# urlencoding は v0.9.3 DEP-1 で撤去 (url::form_urlencoded::byte_serialize で代用)
 
 # UI/CLI 表示系（v0.7.7 で wire-up 完了 — owo-colors/console/supports-color/comfy-table/indicatif）
 indicatif = "0.17"
