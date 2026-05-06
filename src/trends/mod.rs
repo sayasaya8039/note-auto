@@ -67,8 +67,13 @@ pub fn http_client() -> reqwest::Client {
 type SourceFut<'a> = futures::future::BoxFuture<'a, (&'static str, Result<Vec<TrendItem>>)>;
 
 /// L10: `#[tracing::instrument]` で stage 経過時間を自動計測（RUST_LOG=info,note_auto=debug）。
+/// W7-E (v0.9.1): `progress` を渡すと各 source 完了/失敗時に sub_bar 経由で進捗を可視化する。
+///                None の場合は既存挙動と完全互換 (silent fallback)。
 #[tracing::instrument(name = "fetch", skip_all, fields(source_count = cfg.trends.sources.len()))]
-pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
+pub async fn fetch_all(
+    cfg: &Config,
+    progress: Option<&crate::display::PipelineProgress>,
+) -> Result<Vec<TrendItem>> {
     let client = http_client();
     let enabled: std::collections::HashSet<&str> =
         cfg.trends.sources.iter().map(|s| s.as_str()).collect();
@@ -119,13 +124,21 @@ pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
     let results = join_all(futs).await;
     let mut all = Vec::new();
     for (src, res) in results {
+        // W7-E: source 別 sub_bar を取得 (progress=None なら NoopSubBar)
+        let bar = progress.map(|p| p.sub_bar(crate::display::Stage::Fetch, src));
         match res {
             Ok(items) => {
                 tracing::info!(source = src, count = items.len(), "fetched");
+                if let Some(b) = &bar {
+                    b.done(&format!("{} 件", items.len()));
+                }
                 all.extend(items);
             }
             Err(e) => {
                 tracing::warn!(source = src, error = %e, "fetch failed");
+                if let Some(b) = &bar {
+                    b.fail(&e.to_string());
+                }
             }
         }
     }
