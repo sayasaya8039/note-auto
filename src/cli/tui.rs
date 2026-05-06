@@ -110,6 +110,27 @@ struct App {
     error_detail: Option<ErrorDetail>,
     /// W7-F: エラー詳細モーダル表示中 (`e` キーでトグル)
     error_overlay: bool,
+    /// W7-G: stage 配下の sub-bar 状態。key = (Stage, label)、value = SubBarItem
+    /// 例: (Stage::Fetch, "hn") → "hn fetched 30 件" の done state
+    /// 完了/失敗した sub-bar も保持し、stage_done で当該 stage の sub-bars を一括 finish しない
+    /// (個別のラベル毎の done/fail を render に反映、最終 stage 完了時もそのまま表示継続)
+    sub_bars: std::collections::HashMap<(Stage, String), SubBarItem>,
+}
+
+/// W7-G: sub-bar の表示状態 (Pending/InProgress/Done/Failed)
+#[derive(Clone, Debug)]
+struct SubBarItem {
+    state: SubBarState,
+    msg: String,
+    /// stage 配下の表示順序を維持するための insertion order (HashMap は順序保証しないため)
+    order: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SubBarState {
+    InProgress,
+    Done,
+    Failed,
 }
 
 /// W7-F: エラー詳細情報 (StageFail / WorkerDone Err 時に保持)
@@ -158,6 +179,7 @@ impl App {
             help_overlay: false,
             error_detail: None,
             error_overlay: false,
+            sub_bars: std::collections::HashMap::new(),
         }
     }
 
@@ -235,6 +257,47 @@ impl App {
                 self.running = false;
                 self.last_msg = Some("実行完了".to_string());
             }
+            // W7-G: sub-bar イベント処理 — 階層表示用 state 更新
+            PipelineUpdate::SubStart { stage, label } => {
+                let order = self.sub_bars.len();
+                self.sub_bars.insert((stage, label.clone()), SubBarItem {
+                    state: SubBarState::InProgress,
+                    msg: String::new(),
+                    order,
+                });
+            }
+            PipelineUpdate::SubTick { stage, label, msg } => {
+                if let Some(item) = self.sub_bars.get_mut(&(stage, label.clone())) {
+                    item.msg = msg;
+                }
+            }
+            PipelineUpdate::SubDone { stage, label, msg } => {
+                // Borrow checker: entry() の前に len() を取得 (entry は &mut self.sub_bars を奪う)
+                let order_init = self.sub_bars.len();
+                let item = self.sub_bars
+                    .entry((stage, label.clone()))
+                    .or_insert_with(|| SubBarItem {
+                        state: SubBarState::Done,
+                        msg: String::new(),
+                        order: order_init,
+                    });
+                item.state = SubBarState::Done;
+                item.msg = msg.clone();
+                self.push_log(format!("  ↳ [{}/{}] {}", stage.label(), label, msg));
+            }
+            PipelineUpdate::SubFail { stage, label, err } => {
+                let order_init = self.sub_bars.len();
+                let item = self.sub_bars
+                    .entry((stage, label.clone()))
+                    .or_insert_with(|| SubBarItem {
+                        state: SubBarState::Failed,
+                        msg: String::new(),
+                        order: order_init,
+                    });
+                item.state = SubBarState::Failed;
+                item.msg = err.clone();
+                self.push_log(format!("  ↳ ✗ [{}/{}] {}", stage.label(), label, err));
+            }
         }
     }
 
@@ -243,6 +306,8 @@ impl App {
             *s = StageState::Pending;
         }
         self.stage_started_at = [None, None, None, None, None];
+        // W7-G: 新規実行開始時に sub_bars もクリア
+        self.sub_bars.clear();
     }
 }
 
@@ -758,32 +823,61 @@ fn render_sidebar(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_pipeline(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let lines: Vec<Line> = (0..5)
-        .map(|i| {
-            let stage = match i {
-                0 => Stage::Fetch,
-                1 => Stage::Score,
-                2 => Stage::Write,
-                3 => Stage::Publish,
-                _ => Stage::Notify,
+    // W7-G: 各 stage 行 + その配下の sub-bars を階層表示
+    let mut lines: Vec<Line> = Vec::new();
+
+    for i in 0..5 {
+        let stage = match i {
+            0 => Stage::Fetch,
+            1 => Stage::Score,
+            2 => Stage::Write,
+            3 => Stage::Publish,
+            _ => Stage::Notify,
+        };
+        let (icon, color, msg) = match &app.pipeline[i] {
+            StageState::Pending => ("◯", SECONDARY, ""),
+            StageState::InProgress(m) => ("⠿", ACCENT, m.as_str()),
+            StageState::Done(m) => ("✓", SUCCESS, m.as_str()),
+            StageState::Failed(m) => ("✗", ERROR_C, m.as_str()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+            Span::styled(
+                format!("{:<10}", stage.label()),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(msg.to_string(), Style::default().fg(SECONDARY)),
+        ]));
+
+        // W7-G: stage 配下の sub-bars を `↳ <label> <msg>` 形式で挿入順に表示
+        let mut sub_items: Vec<(&String, &SubBarItem)> = app
+            .sub_bars
+            .iter()
+            .filter(|((s, _), _)| *s == stage)
+            .map(|((_, l), v)| (l, v))
+            .collect();
+        sub_items.sort_by_key(|(_, v)| v.order);
+        for (label, item) in sub_items {
+            let (sub_icon, sub_color) = match item.state {
+                SubBarState::InProgress => ("⠿", ACCENT),
+                SubBarState::Done => ("✓", SUCCESS),
+                SubBarState::Failed => ("✗", ERROR_C),
             };
-            let (icon, color, msg) = match &app.pipeline[i] {
-                StageState::Pending => ("◯", SECONDARY, ""),
-                StageState::InProgress(m) => ("⠿", ACCENT, m.as_str()),
-                StageState::Done(m) => ("✓", SUCCESS, m.as_str()),
-                StageState::Failed(m) => ("✗", ERROR_C, m.as_str()),
-            };
-            Line::from(vec![
-                Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+            let arrow = if app.theme.uses_unicode { "↳" } else { ">" };
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(arrow, Style::default().fg(SECONDARY)),
+                Span::raw(" "),
+                Span::styled(format!("{} ", sub_icon), Style::default().fg(sub_color)),
                 Span::styled(
-                    format!("{:<10}", stage.label()),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    format!("{:<14}", label),
+                    Style::default().fg(SECONDARY),
                 ),
-                Span::raw("  "),
-                Span::styled(msg.to_string(), Style::default().fg(SECONDARY)),
-            ])
-        })
-        .collect();
+                Span::styled(item.msg.clone(), Style::default().fg(SECONDARY)),
+            ]));
+        }
+    }
 
     let focused = app.focus == Pane::Pipeline;
     let block = Block::default()
