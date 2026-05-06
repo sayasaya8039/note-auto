@@ -93,6 +93,9 @@ struct App {
     /// P4: 各 stage の InProgress 開始時刻 (elapsed 計測用、Done/Failed 時に差分計算)
     stage_started_at: [Option<std::time::Instant>; 5],
     logs: VecDeque<String>,
+    /// W7-H-5 (v0.9.3): Logs ペインのスクロールオフセット (0 = 最新が末尾、増やすほど過去)
+    /// PgUp/PgDn でページ単位 (5 行) 移動、push_log 時に新規ログが入ると自動で 0 にリセット。
+    logs_scroll: usize,
     focus: Pane,
     /// 実行中フラグ — 二重起動防止
     running: bool,
@@ -170,6 +173,7 @@ impl App {
             ],
             stage_started_at: [None, None, None, None, None],
             logs: VecDeque::with_capacity(1000),
+            logs_scroll: 0,
             focus: Pane::Sidebar,
             running: false,
             quit: false,
@@ -210,6 +214,17 @@ impl App {
             self.logs.pop_front();
         }
         self.logs.push_back(line);
+        // W7-H-5: 新規ログが入ったらスクロールを末尾 (0) にリセット (tail 動作維持)
+        self.logs_scroll = 0;
+    }
+
+    /// W7-H-5: Logs ペインのスクロール (PgUp で過去へ +5、PgDn で最新方向へ -5)
+    fn logs_scroll_up(&mut self, lines: usize) {
+        let max_scroll = self.logs.len().saturating_sub(1);
+        self.logs_scroll = (self.logs_scroll + lines).min(max_scroll);
+    }
+    fn logs_scroll_down(&mut self, lines: usize) {
+        self.logs_scroll = self.logs_scroll.saturating_sub(lines);
     }
 
     fn apply_update(&mut self, upd: PipelineUpdate) {
@@ -520,6 +535,39 @@ async fn handle_key(
                 app.select_prev();
             }
         }
+        // W7-H-1 (v0.9.3): vim ライク nav h/l でペイン切替
+        // h = Sidebar に focus (左寄せ)
+        // l = 次のペインに循環 (Tab と同じ cycle、Sidebar→Pipeline→Logs→Sidebar)
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.focus = Pane::Sidebar;
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.cycle_focus();
+        }
+        // W7-H-5 (v0.9.3): Logs ペインの履歴スクロール (PgUp 過去 / PgDn 最新)
+        // ページ単位 = 5 lines。Logs focus 時のみ反応 (Sidebar/Pipeline 操作と衝突回避)
+        KeyCode::PageUp => {
+            if app.focus == Pane::Logs {
+                app.logs_scroll_up(5);
+            }
+        }
+        KeyCode::PageDown => {
+            if app.focus == Pane::Logs {
+                app.logs_scroll_down(5);
+            }
+        }
+        KeyCode::Home => {
+            // 過去の最古へジャンプ
+            if app.focus == Pane::Logs {
+                app.logs_scroll_up(usize::MAX);
+            }
+        }
+        KeyCode::End => {
+            // 最新へ戻る
+            if app.focus == Pane::Logs {
+                app.logs_scroll = 0;
+            }
+        }
         KeyCode::Tab => app.cycle_focus(),
         KeyCode::Enter => {
             if app.running {
@@ -674,9 +722,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 fn render_help_overlay(f: &mut ratatui::Frame, app: &App) {
     use ratatui::widgets::Clear;
 
+    // W7-H-1/H-5 追加分でキー一覧が増えたため modal_h を 16 → 22 に拡張
     let area = f.area();
-    let modal_w = 56u16.min(area.width.saturating_sub(4));
-    let modal_h = 16u16.min(area.height.saturating_sub(4));
+    let modal_w = 60u16.min(area.width.saturating_sub(4));
+    let modal_h = 22u16.min(area.height.saturating_sub(4));
     let modal_x = area.x + (area.width.saturating_sub(modal_w)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
@@ -706,12 +755,32 @@ fn render_help_overlay(f: &mut ratatui::Frame, app: &App) {
             Span::raw("ペイン切替 (Sidebar↔Pipeline↔Logs)"),
         ]),
         Line::from(vec![
+            Span::styled("  h / ←     ", Style::default().fg(ACCENT)),
+            Span::raw("Sidebar に focus (vim nav)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  l / →     ", Style::default().fg(ACCENT)),
+            Span::raw("次のペインへ循環 (vim nav)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  PgUp/PgDn ", Style::default().fg(ACCENT)),
+            Span::raw("Logs スクロール (Logs focus 時、5 行/page)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Home/End  ", Style::default().fg(ACCENT)),
+            Span::raw("Logs 最古/最新ジャンプ"),
+        ]),
+        Line::from(vec![
             Span::styled("  Ctrl-L    ", Style::default().fg(ACCENT)),
             Span::raw("Logs ペインクリア"),
         ]),
         Line::from(vec![
             Span::styled("  ?         ", Style::default().fg(ACCENT)),
             Span::raw("このヘルプを toggle"),
+        ]),
+        Line::from(vec![
+            Span::styled("  e         ", Style::default().fg(ACCENT)),
+            Span::raw("最新エラー詳細 modal (履歴あれば)"),
         ]),
         Line::from(vec![
             Span::styled("  q / Esc   ", Style::default().fg(ACCENT)),
@@ -894,18 +963,32 @@ fn render_pipeline(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    // W7-H-5 (v0.9.3): logs_scroll で過去スクロール対応。
+    // 表示窓は area.height - 2 行 (border 上下分)。
+    // logs_scroll = 0 → 末尾 (最新) を窓に揃える
+    // logs_scroll = N → 末尾から N 行ぶん過去にずらす
+    let visible = area.height.saturating_sub(2) as usize;
+    let total = app.logs.len();
+    // 末尾から (logs_scroll + visible) 行を取り、その中の先頭 visible 行を表示
+    let end = total.saturating_sub(app.logs_scroll);
+    let start = end.saturating_sub(visible);
     let lines: Vec<Line> = app
         .logs
         .iter()
-        .rev()
-        .take(area.height.saturating_sub(2) as usize)
-        .rev()
+        .skip(start)
+        .take(end.saturating_sub(start))
         .map(|s| Line::from(s.as_str()))
         .collect();
 
     let focused = app.focus == Pane::Logs;
+    // タイトルにスクロール状態を表示 (offset > 0 なら "(N↑)" バッジ)
+    let title = if app.logs_scroll > 0 {
+        format!(" Logs ({} | {}↑) ", total, app.logs_scroll)
+    } else {
+        format!(" Logs ({}) ", total)
+    };
     let block = Block::default()
-        .title(format!(" Logs ({}) ", app.logs.len()))
+        .title(title)
         .borders(Borders::ALL)
         .border_type(border_type_for(&app.theme))
         .border_style(if focused {
