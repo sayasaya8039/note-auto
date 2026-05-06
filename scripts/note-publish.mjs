@@ -44,8 +44,12 @@ function parseFrontMatter(md) {
   return { title: titleMatch?.[1] ?? "", body };
 }
 
-/** ポートが LISTEN になるまで待つ (最大 timeoutMs) */
-async function waitForPort(port, timeoutMs = 20_000) {
+/**
+ * ポートが LISTEN になるまで待つ (最大 timeoutMs)
+ * Fix-B (v0.9.4): default timeout を 20s → 5s に短縮。fail fast で
+ * 次 candidate に進むほうが SingletonLock 等の即死シナリオで速く回復する。
+ */
+async function waitForPort(port, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const ok = await new Promise((r) => {
@@ -60,12 +64,28 @@ async function waitForPort(port, timeoutMs = 20_000) {
 }
 
 /**
+ * 残骸の SingletonLock / SingletonCookie / SingletonSocket を best-effort で削除。
+ * Fix-B: 前回 Chrome が異常終了するとロックが残り、次回起動が exit code 21 で即死する。
+ */
+function cleanupSingletonLocks(profileDir) {
+  for (const lock of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    try {
+      unlinkSync(resolve(profileDir, lock));
+    } catch {
+      // 存在しない / 削除不能は無視
+    }
+  }
+}
+
+/**
  * CDP ポート経由で Chrome/Edge を起動して connectOverCDP で接続。
  * Playwright の managed spawn が remote-debugging-pipe 問題で失敗する Windows 環境向け。
  */
-async function launchViaCDP(executablePath, cookieDir, headless) {
+async function launchViaCDP(executablePath, cookieDir, headless, retryCount = 0) {
   const profileDir = resolve(cookieDir, "browser-profile");
   mkdirSync(profileDir, { recursive: true });
+  // Fix-B: 残骸 SingletonLock を削除
+  cleanupSingletonLocks(profileDir);
   const port = 9222 + Math.floor(Math.random() * 1000); // ランダムで衝突回避
   // module-level COMMON_UA を使用 (CDP / managed 両経路で統一)
   const args = [
@@ -81,11 +101,38 @@ async function launchViaCDP(executablePath, cookieDir, headless) {
   if (headless) args.push("--headless=new");
   args.push("about:blank");
 
-  console.error(`[cdp] spawning ${executablePath} on port ${port}...`);
+  console.error(`[cdp] spawning ${executablePath} on port ${port}${retryCount ? ` (retry ${retryCount})` : ""}...`);
   const child = spawn(executablePath, args, { detached: false, stdio: "ignore", windowsHide: false });
-  child.on("exit", (code) => console.error(`[cdp] browser exited code=${code}`));
 
-  await waitForPort(port);
+  // Fix-B: exit code 21 (SingletonLock collision) を即検出して fail fast
+  let earlyExitCode = null;
+  const exitPromise = new Promise((_, rej) => {
+    child.once("exit", (code) => {
+      earlyExitCode = code;
+      console.error(`[cdp] browser exited code=${code}`);
+      if (code === 21) {
+        rej(new Error(`SingletonLock collision (exit=21)`));
+      } else if (code !== null && code !== 0) {
+        rej(new Error(`browser exited code=${code} before port ready`));
+      }
+    });
+  });
+
+  try {
+    await Promise.race([waitForPort(port), exitPromise]);
+  } catch (e) {
+    // SingletonLock 衝突 → 1 回だけ 5s 待って同 candidate を retry
+    if (/SingletonLock collision/.test(e.message) && retryCount === 0) {
+      console.error(`[cdp] SingletonLock collision detected, waiting 5s and retrying...`);
+      try { child.kill(); } catch {}
+      await sleep(5_000);
+      return await launchViaCDP(executablePath, cookieDir, headless, retryCount + 1);
+    }
+    // それ以外の早期 exit / port timeout → 子プロセス確実に kill
+    try { if (!child.killed) child.kill(); } catch {}
+    throw e;
+  }
+
   console.error(`[cdp] port ${port} ready, connecting...`);
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const ctx = browser.contexts()[0] ?? await browser.newContext();
@@ -141,6 +188,7 @@ async function launchContext(cookieDir, headless, persist) {
       : baseArgs;
     if (persist) {
       mkdirSync(profileDir, { recursive: true });
+      cleanupSingletonLocks(profileDir); // Fix-B: persist 経路でも残骸ロック削除
       const opts = { headless, timeout: TIMEOUT_MS };
       if (channel) opts.channel = channel;
       if (args) opts.args = args;
