@@ -163,8 +163,12 @@ async fn write_one(
     // konbini/hyakkin ソース由来 → ソース公式画像で inline (idx 1..=3) を上書き
     let source = trend.item.source.as_str();
     if matches!(source, "konbini" | "hyakkin") && !trend.item.image_urls.is_empty() && !dry_run {
-        let downloaded =
-            download_source_images(&http, &trend.item.image_urls, 3).await;
+        // M3-C: SecurityConfig の allowlist を渡して domain 制限 + TOCTOU pin
+        let downloaded = download_source_images(
+            &trend.item.image_urls,
+            &cfg.security.image_url_allowlist,
+            3,
+        ).await;
         let mut replaced = 0;
         for (slot, img_opt) in downloaded.into_iter().enumerate() {
             let target_idx = slot + 1; // images[0] は hero、1..=3 が inline
@@ -309,80 +313,48 @@ async fn generate_single_image(
     }
 }
 
-/// M3 (SSRF guard, Fix B 熟成版): 画像 URL の SSRF 防御。
+/// ソース公式 URL から画像を最大 max_count 件並行ダウンロード (M3-C 完全版)。
 ///
-/// ## 設計層 (defense-in-depth)
-/// 1. **L1 (Fix A 簡易、v0.9.0 既設)**: scheme==https / IPv4 リテラル private/loopback/link-local block
-/// 2. **L2 (Fix B 本 PR)**: DNS hostname を resolve し、解決後の全 IP を check
-///    (DNS rebinding / 内部 hostname → 内部 IP 解決を block)
+/// ## 防御層 (M3-C で defense-in-depth 完成)
+/// - L1 (M3 Fix A): scheme==https + IPv4 リテラル private 等 block
+/// - L2 (M3-B):     DNS resolve 後の全 IP に対する safety check
+/// - L3 (M3-C):     domain allowlist (config-driven、`SecurityConfig::image_url_allowlist`)
+/// - L4 (M3-C):     resolve pin で TOCTOU race 排除 (per-URL secure client)
+/// - L5 (M3-C):     cross-domain redirect block (open redirect bypass 防止)
 ///
-/// ## 攻撃 surface 縮小
-/// 旧 Fix A は IP リテラル URL のみ block していたため、`https://internal.local/...`
-/// (内部 hostname → 内部 IP 解決) は通過してしまう問題があった。Fix B では
-/// DNS 解決後の IP も check することでこの抜け穴を塞ぐ。
+/// 各 URL ごとに `crate::util::check_and_pin_image_client` で safety check + pin client を取得し、
+/// その client で fetch する。M3-B 既存 `is_safe_image_url` + 共有 client は廃止
+/// (TOCTOU race を 100% 排除するため、URL ごとに新規 client 必須)。
 ///
-/// ## v0.9.2+ で扱う追加対策 (本 PR スコープ外)
-/// - domain allowlist (config-driven、retail CDN 限定等)
-/// - 真の TOCTOU 対策 (reqwest::Client::resolve override で resolve 結果を固定)
-/// - IPv6 詳細 prefix (mapped IPv4 等)
-async fn is_safe_image_url(u: &str) -> bool {
-    use std::net::IpAddr;
-    let url = match url::Url::parse(u) {
-        Ok(x) => x,
-        Err(_) => return false,
-    };
-    if url.scheme() != "https" {
-        return false;
-    }
-    let host = match url.host_str() {
-        Some(h) => h,
-        None => return false,
-    };
-
-    // L1: IP リテラル直書きの場合は同期 check で完結
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if ip.is_loopback() || ip.is_unspecified() {
-            return false;
-        }
-        if let IpAddr::V4(v4) = ip {
-            if v4.is_private() || v4.is_link_local() {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // L2 (M3-B Fix B): DNS hostname の場合、resolve 後の全 IP を check
-    crate::util::resolve_and_check_safe_ip(host).await
-}
-
-/// ソース公式 URL から画像を最大 max_count 件並行ダウンロード。
 /// 失敗 / 容量不足 / 異常 MIME は None を返し、AI 生成のフォールバックを残す。
 async fn download_source_images(
-    http: &reqwest::Client,
     urls: &[String],
+    allowlist: &[String],
     max_count: usize,
 ) -> Vec<Option<ImageAsset>> {
     use futures::future::join_all;
     use futures::stream::{self, StreamExt};
-    // M3-B (SSRF Fix B): is_safe_image_url が async (DNS resolve 含む) になったため、
-    //                    async stream filter で max_count 件まで safe URL を収集。
-    //                    L1: IP リテラル direct check + L2: DNS resolve 後の全 IP check
-    let candidates: Vec<String> = stream::iter(urls.iter().cloned())
-        .filter(|u| {
-            let u = u.clone();
-            async move { is_safe_image_url(&u).await }
+
+    // M3-C: 各 URL ごとに secure pin client を build (allowlist + DNS check + resolve pin)。
+    //       deny されれば None で落ち、collect から除外される。
+    let candidates: Vec<(String, reqwest::Client)> = stream::iter(urls.iter().cloned())
+        .filter_map(|u| {
+            let allowlist = allowlist.to_vec();
+            async move {
+                let client = crate::util::check_and_pin_image_client(&u, &allowlist).await?;
+                Some((u, client))
+            }
         })
         .take(max_count)
         .collect()
         .await;
-    let candidates: Vec<&String> = candidates.iter().collect();
+
     if candidates.is_empty() {
         return vec![None; max_count];
     }
-    let futs = candidates.iter().enumerate().map(|(i, u)| {
-        let http = http.clone();
-        let url = (*u).clone();
+
+    let futs = candidates.into_iter().enumerate().map(|(i, (url, client))| {
+        let http = client; // M3-C: per-URL pin された secure client を使用
         async move {
             let resp = match http
                 .get(&url)
