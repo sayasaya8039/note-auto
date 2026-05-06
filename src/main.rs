@@ -118,6 +118,11 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // .env を起動時に読み込み (Fix-E v0.9.4 hot-fix)
+    // SLACK_WEBHOOK_URL / *_API_KEY / X_*_TOKEN 等は .env 経由で注入される。
+    // 失敗してもエラーにせず続行 (.env 不在環境でも動作)。
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
 
     // テーマ初期化 (NO_COLOR / --ascii / --color の解決)
