@@ -226,6 +226,41 @@ async function launchContext(cookieDir, headless, persist) {
   throw lastErr instanceof Error ? lastErr : new Error("all launch candidates failed");
 }
 
+/**
+ * waitForSelector を 60s timeout + 失敗時 screenshot + reload 1 retry で堅牢化。
+ * Fix-S (v0.9.4): React hydrate 遅延で 30s では足りない / 失敗痕跡が残らない問題を解消。
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} selector
+ * @param {string} stage     ログ + screenshot ファイル名識別子 (例: "title", "body")
+ * @param {string} cookieDir screenshot 保存先 (cookie_dir/screenshots/)
+ */
+async function waitForSelectorWithRetry(page, selector, stage, cookieDir) {
+  const TIMEOUT = 60_000;
+  try {
+    await page.waitForSelector(selector, { timeout: TIMEOUT });
+    return;
+  } catch (e1) {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const shotDir = resolve(cookieDir, "screenshots");
+    try { mkdirSync(shotDir, { recursive: true }); } catch {}
+    const shotPath = join(shotDir, `${ts}-${stage}-fail.png`);
+    try { await page.screenshot({ path: shotPath, fullPage: true }); } catch {}
+    console.error(`[publish] waitForSelector(${stage}) FAILED, screenshot=${shotPath}, reloading and retrying once...`);
+    try {
+      await page.reload({ waitUntil: "networkidle", timeout: TIMEOUT });
+      await page.waitForTimeout(3000);
+      await page.waitForSelector(selector, { timeout: TIMEOUT });
+      console.error(`[publish] waitForSelector(${stage}) OK on retry`);
+      return;
+    } catch (e2) {
+      const shotPath2 = join(shotDir, `${ts}-${stage}-fail2.png`);
+      try { await page.screenshot({ path: shotPath2, fullPage: true }); } catch {}
+      throw new Error(`${stage} selector not found after reload: ${e2.message}`);
+    }
+  }
+}
+
 async function loginFlow(cookieDir) {
   mkdirSync(cookieDir, { recursive: true });
   console.error(`[login] cookie_dir=${resolve(cookieDir)}`);
@@ -275,13 +310,15 @@ async function run(input) {
 
     // タイトル (textarea[placeholder="記事タイトル"])
     const titleSel = 'textarea[placeholder="記事タイトル"]';
-    await page.waitForSelector(titleSel, { timeout: 30000 });
+    // Fix-S: 60s timeout + 失敗時 screenshot + reload 1 retry
+    await waitForSelectorWithRetry(page, titleSel, "title", input.cookie_dir);
     await page.fill(titleSel, finalTitle);
 
     // 本文 (ProseMirror エディタ)
     // markdown を HTML に変換し、DataTransfer 経由で paste イベントを dispatch する
     const bodySel = 'div.ProseMirror[contenteditable="true"]';
-    await page.waitForSelector(bodySel, { timeout: 30000 });
+    // Fix-S: 60s timeout + 失敗時 screenshot + reload 1 retry
+    await waitForSelectorWithRetry(page, bodySel, "body", input.cookie_dir);
     const bodyLocator = page.locator(bodySel).first();
     await bodyLocator.click();
     await page.waitForTimeout(500);
