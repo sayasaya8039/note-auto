@@ -57,10 +57,18 @@ pub async fn run(
     let concurrency = cfg.writer.concurrency.max(1);
     let owned: Vec<(usize, SelectedTrend)> =
         trends.iter().cloned().enumerate().collect();
+
+    // WPW1 (v0.9.2): article ごとに sub_bar を事前作成し、write_one に move で渡す。
+    // write_one 内部の各 phase で bar.tick() 駆動、結果に応じて bar.done/fail を呼ぶため、
+    // run() 側 results loop では sub_bar 駆動を行わない (write_one が責任を持つ)。
+    // label は trend.title を 24 文字で短縮 (slug は brief 後にしか取れないため)。
     let tasks = owned.into_iter().map(|(i, t)| {
         let out = out_dir.to_path_buf();
         let cfg = cfg.clone();
-        async move { (i, write_one(&cfg, &t, &out, i).await) }
+        let label = short_label(&t.item.title, 24, i);
+        let bar: Option<Box<dyn crate::display::SubBar>> = progress
+            .map(|p| p.sub_bar(crate::display::Stage::Write, &label));
+        async move { (i, write_one(&cfg, &t, &out, i, bar).await) }
     });
 
     let results: Vec<(usize, Result<WrittenArticle>)> = stream::iter(tasks)
@@ -73,19 +81,10 @@ pub async fn run(
         match r {
             Ok(a) => {
                 tracing::info!(slug = %a.slug, chars = a.char_count, "article written");
-                // W7-E: 各記事の write 完了を sub_bar に反映
-                if let Some(p) = progress {
-                    let bar = p.sub_bar(crate::display::Stage::Write, &a.slug);
-                    bar.done(&format!("{} 字", a.char_count));
-                }
                 written.push(a);
             }
             Err(e) => {
                 tracing::error!(index = i, error = format!("{:#}", e), "article failed");
-                if let Some(p) = progress {
-                    let bar = p.sub_bar(crate::display::Stage::Write, &format!("article#{i}"));
-                    bar.fail(&format!("{:#}", e));
-                }
             }
         }
     }
@@ -105,29 +104,61 @@ async fn write_one(
     trend: &SelectedTrend,
     out_dir: &Path,
     index: usize,
+    bar: Option<Box<dyn crate::display::SubBar>>,
 ) -> Result<WrittenArticle> {
     let http = http_client();
     let dry_run = cfg.writer.dry_run;
 
-    // 1. リサーチ
+    // WPW1: 各 phase 開始時に sub_bar.tick() で進捗 message 更新
+    let tick = |msg: &str| {
+        if let Some(b) = bar.as_deref() {
+            b.tick(msg);
+        }
+    };
+
+    // 1. リサーチ (Grok)
+    tick("research (Grok)…");
     let research = if dry_run {
         GrokClient::stub(trend)
     } else {
         let key = cfg.trends.xai_api_key.as_deref()
-            .ok_or_else(|| anyhow!("XAI_API_KEY required for research (or set writer.dry_run=true)"))?;
-        GrokClient::new(&http, key, &cfg.writer.grok_model).research(trend).await
-            .with_context(|| format!("grok research failed for {:?}", trend.item.title))?
+            .ok_or_else(|| {
+                let err_msg = "XAI_API_KEY required for research (or set writer.dry_run=true)";
+                if let Some(b) = bar.as_deref() { b.fail(err_msg); }
+                anyhow!(err_msg)
+            })?;
+        match GrokClient::new(&http, key, &cfg.writer.grok_model).research(trend).await
+            .with_context(|| format!("grok research failed for {:?}", trend.item.title))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(b) = bar.as_deref() { b.fail(&format!("research: {e:#}")); }
+                return Err(e);
+            }
+        }
     };
 
     // 2. ブリーフ (Haiku) — 20タグ + 4画像プロンプト含む
+    tick("brief (Haiku)…");
     let brief = if dry_run {
         stub_brief(trend, index)
     } else {
         let key = cfg.writer.anthropic_api_key.as_deref()
-            .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY required (or set writer.dry_run=true)"))?;
-        AnthropicClient::new(&http, key, &cfg.writer.opus_model, &cfg.writer.haiku_model, cfg.writer.max_tokens)
+            .ok_or_else(|| {
+                let err_msg = "ANTHROPIC_API_KEY required (or set writer.dry_run=true)";
+                if let Some(b) = bar.as_deref() { b.fail(err_msg); }
+                anyhow!(err_msg)
+            })?;
+        match AnthropicClient::new(&http, key, &cfg.writer.opus_model, &cfg.writer.haiku_model, cfg.writer.max_tokens)
             .brief(trend, &research).await
-            .with_context(|| "Haiku brief failed")?
+            .with_context(|| "Haiku brief failed")
+        {
+            Ok(b) => b,
+            Err(e) => {
+                if let Some(bar_ref) = bar.as_deref() { bar_ref.fail(&format!("brief: {e:#}")); }
+                return Err(e);
+            }
+        }
     };
     tracing::info!(index, slug = %brief.slug, tags = brief.tags.len(), imgs = brief.image_prompts.len(), "brief done");
 
@@ -143,6 +174,8 @@ async fn write_one(
         brief_for_images.image_prompts[0] = hero_prompt;
     }
 
+    // 3. 本文 (Opus) + 画像生成 並列実行
+    tick("draft (Opus) + images parallel…");
     let (draft_res, images_res) = tokio::join!(
         async {
             if dry_run {
@@ -157,12 +190,20 @@ async fn write_one(
         },
         generate_images(cfg, &http, &brief_for_images, dry_run),
     );
-    let draft = draft_res?;
+    let draft = match draft_res {
+        Ok(d) => d,
+        Err(e) => {
+            if let Some(b) = bar.as_deref() { b.fail(&format!("draft: {e:#}")); }
+            return Err(e);
+        }
+    };
     let mut images = images_res; // Vec<Option<ImageAsset>> (常に長さ 4)
 
-    // konbini/hyakkin ソース由来 → ソース公式画像で inline (idx 1..=3) を上書き
+    // 4. konbini/hyakkin ソース由来 → ソース公式画像で inline (idx 1..=3) を上書き
+    //    (M3-C SSRF check + per-URL pin client + cross-domain redirect block)
     let source = trend.item.source.as_str();
     if matches!(source, "konbini" | "hyakkin") && !trend.item.image_urls.is_empty() && !dry_run {
+        tick("source images (SSRF check + pin client)…");
         // M3-C: SecurityConfig の allowlist を渡して domain 制限 + TOCTOU pin
         let downloaded = download_source_images(
             &trend.item.image_urls,
@@ -190,9 +231,17 @@ async fn write_one(
     }
     tracing::info!(index, chars = draft.char_count, "body done");
 
-    // 4. 画像ファイル保存 + placeholder 置換
-    let (image_path, inline_paths, body_with_images) =
-        embed_images(out_dir, &safe_slug, &images, &draft.body_markdown)?;
+    // 5. 画像ファイル保存 + placeholder 置換
+    tick("embed images & placeholder…");
+    let (image_path, inline_paths, body_with_images) = match
+        embed_images(out_dir, &safe_slug, &images, &draft.body_markdown)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(b) = bar.as_deref() { b.fail(&format!("embed: {e:#}")); }
+            return Err(e);
+        }
+    };
 
     // 5. front matter + 保存
     let front_matter = format!(
@@ -209,9 +258,21 @@ async fn write_one(
             .unwrap_or_default(),
     );
 
+    // 6. ファイル書込 (atomic 相当の即時 write)
+    tick("save markdown…");
     let md_path = out_dir.join(format!("{safe_slug}.md"));
     let full = format!("{front_matter}{body_with_images}\n");
-    std::fs::write(&md_path, full)?;
+    if let Err(e) = std::fs::write(&md_path, full) {
+        if let Some(b) = bar.as_deref() {
+            b.fail(&format!("save: {e}"));
+        }
+        return Err(e.into());
+    }
+
+    // 全 phase 成功 — sub_bar を done で締める
+    if let Some(b) = bar.as_deref() {
+        b.done(&format!("{} 字", draft.char_count));
+    }
 
     Ok(WrittenArticle {
         title: brief.title,
@@ -224,6 +285,20 @@ async fn write_one(
         inline_image_paths: inline_paths,
         source_url: trend.item.url.clone(),
     })
+}
+
+/// WPW1: trend.title から sub_bar 用ラベルを短縮 (slug より早く取得可能)
+fn short_label(s: &str, max: usize, fallback_idx: usize) -> String {
+    if s.is_empty() {
+        return format!("article#{fallback_idx}");
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        let head: String = chars.into_iter().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }
 
 /// 4枚の画像を並列生成。image_prompts が足りない時はテンプレートで補完。
