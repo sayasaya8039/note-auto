@@ -14,7 +14,7 @@
 console.error("[note-publish] script start (node)");
 
 import { chromium } from "playwright";
-import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
@@ -22,6 +22,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { marked } from "marked";
 
 console.error("[note-publish] playwright imported");
+
+/**
+ * note.com の API は HeadlessChrome/... の素 UA を CORS で弾くので
+ * CDP launch / managed launch / persistent launch すべてで同一の通常 Chrome UA を使う。
+ * Fix-A (v0.9.4): managed chromium fallback で UA が露呈する問題を解消。
+ */
+const COMMON_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 async function readStdin() {
   const chunks = [];
@@ -60,9 +67,7 @@ async function launchViaCDP(executablePath, cookieDir, headless) {
   const profileDir = resolve(cookieDir, "browser-profile");
   mkdirSync(profileDir, { recursive: true });
   const port = 9222 + Math.floor(Math.random() * 1000); // ランダムで衝突回避
-  // HeadlessChrome/... の UA を note.com の API が CORS 弾きにするので
-  // 通常 Chrome の UA に偽装する
-  const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+  // module-level COMMON_UA を使用 (CDP / managed 両経路で統一)
   const args = [
     `--user-data-dir=${profileDir}`,
     `--remote-debugging-port=${port}`,
@@ -71,7 +76,7 @@ async function launchViaCDP(executablePath, cookieDir, headless) {
     "--disable-features=Translate",
     // headless detection 回避
     "--disable-blink-features=AutomationControlled",
-    `--user-agent=${UA}`,
+    `--user-agent=${COMMON_UA}`,
   ];
   if (headless) args.push("--headless=new");
   args.push("about:blank");
@@ -129,6 +134,7 @@ async function launchContext(cookieDir, headless, persist) {
     const baseArgs = [
       "--disable-blink-features=AutomationControlled",
       "--disable-features=IsolateOrigins,site-per-process",
+      `--user-agent=${COMMON_UA}`, // Fix-A: managed chromium fallback でも UA を統一
     ];
     const args = noSandbox
       ? [...baseArgs, "--no-sandbox", "--disable-gpu-sandbox", "--disable-setuid-sandbox"]
