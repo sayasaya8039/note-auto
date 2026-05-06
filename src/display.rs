@@ -708,8 +708,11 @@ fn visible_len(s: &str) -> usize {
             in_esc = true;
             continue;
         }
-        // wide char を 2 とカウント
-        n += if c.is_ascii() { 1 } else if (c as u32) < 0x2000 { 1 } else { 1 };
+        // CL1: 旧実装は wide char を 2 とカウントする計画だったが全 branch で 1 を返す
+        //      identical if blocks になっていた (clippy::if_same_then_else)。
+        //      現状は CJK 等を含めて 1 char = 1 column として扱う。
+        //      正確な width 判定は将来 unicode-width crate 導入時に再検討。
+        n += 1;
     }
     n
 }

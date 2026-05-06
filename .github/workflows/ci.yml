@@ -43,16 +43,11 @@ jobs:
           shared-key: ci-lint
 
       - name: cargo clippy (warnings as errors)
-        # CI1 baseline (v0.9.0): build warnings 0 を強制。
-        # clippy 拡張 lint (style/complexity) は段階的導入のため、現状 2 系統を allow:
-        #   - if_same_then_else: display.rs (theme 分岐 boilerplate、UI 領域は別 PR で整理)
-        #   - type_complexity:   trends/mod.rs (Vec<BoxFuture<...>> futures vector、後の AF1 で抽象化)
-        # 将来 (Phase 4+) で個別 lint を解消し、allow を順次撤去予定。
-        run: |
-          cargo clippy --release --all-targets -- \
-            -D warnings \
-            -A clippy::if_same_then_else \
-            -A clippy::type_complexity
+        # CL1 (v0.9.1): clippy 拡張 lint allow を全撤去。
+        # display.rs の identical if (n += 1 統合) と trends/mod.rs の type alias
+        # 導入で if_same_then_else / type_complexity ともに自然解消済。
+        # 全 lint default で -D warnings 強制。
+        run: cargo clippy --release --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --release

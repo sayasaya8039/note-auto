@@ -62,6 +62,10 @@ pub fn http_client() -> reqwest::Client {
 
 /// 全ソースを並行で取得。個別失敗はログして継続。
 ///
+/// CL1: 型エイリアスで type_complexity 解消。各 source fetch の future は
+///      (label, fetch result) の tuple を返す。lifetime 'a は client の借用に紐づく。
+type SourceFut<'a> = futures::future::BoxFuture<'a, (&'static str, Result<Vec<TrendItem>>)>;
+
 /// L10: `#[tracing::instrument]` で stage 経過時間を自動計測（RUST_LOG=info,note_auto=debug）。
 #[tracing::instrument(name = "fetch", skip_all, fields(source_count = cfg.trends.sources.len()))]
 pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
@@ -69,7 +73,7 @@ pub async fn fetch_all(cfg: &Config) -> Result<Vec<TrendItem>> {
     let enabled: std::collections::HashSet<&str> =
         cfg.trends.sources.iter().map(|s| s.as_str()).collect();
 
-    let mut futs: Vec<futures::future::BoxFuture<'_, (&'static str, Result<Vec<TrendItem>>)>> = vec![];
+    let mut futs: Vec<SourceFut<'_>> = vec![];
 
     if enabled.contains("x") {
         futs.push(Box::pin(async {
