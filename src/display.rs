@@ -279,8 +279,22 @@ pub fn print_banner(theme: &Theme, version: &str) {
         .collect();
     let line = stages_inline.join(&format!("   {}   ", dim(theme, "")));
 
-    let inner_width = 56_usize;
-    let title_pad = inner_width.saturating_sub(visible_len(&title));
+    // CLI-5 (v0.9.3): terminal 幅に追従。
+    // - 取得失敗時は 56 cols (v0.7.6 互換) を fallback。
+    // - 上限 120 cols でクリップ (横長 terminal でバナーが冗長化しない)。
+    // - 下限はステージ行 (visible_len 約 50) + 余白に配慮して 50 cols。
+    // - 実 inner_width = max(stage 行幅, title 幅) を満たす最小値で動的決定。
+    let term_width = console::Term::stdout()
+        .size_checked()
+        .map(|(_h, w)| w as usize)
+        .unwrap_or(60);
+    let stages_visible = visible_len(&line);
+    let title_visible = visible_len(&title);
+    let min_required = stages_visible.max(title_visible) + 4; // 内側余白
+    let cap = term_width.saturating_sub(2).clamp(50, 120);
+    let inner_width = cap.max(min_required).min(120);
+
+    let title_pad = inner_width.saturating_sub(title_visible);
     let title_filler = g.h_line.repeat(title_pad.saturating_sub(2));
 
     eprintln!(
@@ -291,7 +305,14 @@ pub fn print_banner(theme: &Theme, version: &str) {
         title_filler,
         g.box_tr
     );
-    eprintln!("{}  {}  {}", g.v_line, line, g.v_line);
+    let stages_pad = inner_width.saturating_sub(stages_visible).saturating_sub(2);
+    eprintln!(
+        "{}  {}{}  {}",
+        g.v_line,
+        line,
+        " ".repeat(stages_pad),
+        g.v_line
+    );
     eprintln!(
         "{}{}{}",
         g.box_bl,
@@ -638,9 +659,9 @@ pub enum PipelineUpdate {
     StageFail { stage: Stage, err: String },
     /// W7-G: sub-bar 開始 (sub_bar() 呼出時、現状未使用だが将来 tick 系拡張時に利用)
     SubStart { stage: Stage, label: String },
-    /// W7-G: sub-bar tick (`SubBar::tick(msg)` 経由、現状 writer/publish/trends は未使用)。
-    /// Phase 4 の WPW1 (writer 内部 phase wire) で writer から tick() 呼出が始まる予定。
-    #[allow(dead_code)]
+    /// W7-G: sub-bar tick (`SubBar::tick(msg)` 経由)。
+    /// WPW1 (v0.9.2) で writer 内部 phase wire が完成し、`writer::write_one` から
+    /// 各 phase 開始時に発火される (research / brief / draft / image / embed / save)。
     SubTick { stage: Stage, label: String, msg: String },
     /// W7-G: sub-bar 完了 (`SubBar::done(msg)`)
     SubDone { stage: Stage, label: String, msg: String },
