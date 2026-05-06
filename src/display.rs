@@ -338,7 +338,7 @@ pub fn print_check(theme: &Theme, msg: &str) {
 // 状態遷移する。ProgressBar は Spinner 専用 (count なし)、tick_chars は theme に
 // 合わせて Braille / ASCII 切替。非 TTY なら DrawTarget::hidden で完全静音。
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(usize)]
 pub enum Stage {
     Fetch = 0,
@@ -628,12 +628,24 @@ impl Drop for PipelineProgress {
 // ratatui Frame を再描画する。
 
 /// パイプライン進捗イベント (TUI backend が mpsc 経由で送信)。
+/// W7-G (v0.9.2): SubStart/SubDone/SubFail を追加。writer/publish/trends から発火される
+/// sub_bar 進捗イベントを TUI App に流し、Pipeline ペインで階層表示する。
 #[cfg(feature = "tui")]
 #[derive(Clone, Debug)]
 pub enum PipelineUpdate {
     StageStart { stage: Stage, msg: String },
     StageDone { stage: Stage, msg: String },
     StageFail { stage: Stage, err: String },
+    /// W7-G: sub-bar 開始 (sub_bar() 呼出時、現状未使用だが将来 tick 系拡張時に利用)
+    SubStart { stage: Stage, label: String },
+    /// W7-G: sub-bar tick (`SubBar::tick(msg)` 経由、現状 writer/publish/trends は未使用)。
+    /// Phase 4 の WPW1 (writer 内部 phase wire) で writer から tick() 呼出が始まる予定。
+    #[allow(dead_code)]
+    SubTick { stage: Stage, label: String, msg: String },
+    /// W7-G: sub-bar 完了 (`SubBar::done(msg)`)
+    SubDone { stage: Stage, label: String, msg: String },
+    /// W7-G: sub-bar 失敗 (`SubBar::fail(err)`)
+    SubFail { stage: Stage, label: String, err: String },
     Finished,
 }
 
@@ -664,6 +676,53 @@ impl PipelineBackend for TuiBackend {
     }
     fn finish(&self) {
         let _ = self.tx.send(PipelineUpdate::Finished);
+    }
+
+    /// W7-G: TuiBackend では sub_bar も mpsc 経由で App に流す。
+    /// `TuiSubBar` 構造体が tick/done/fail で SubTick/SubDone/SubFail event を送信する。
+    fn sub_bar(&self, stage: Stage, label: &str) -> Box<dyn SubBar> {
+        let _ = self.tx.send(PipelineUpdate::SubStart {
+            stage,
+            label: label.to_string(),
+        });
+        Box::new(TuiSubBar {
+            tx: self.tx.clone(),
+            stage,
+            label: label.to_string(),
+        })
+    }
+}
+
+/// W7-G: TuiBackend 用 SubBar 実装。各 method で mpsc 経由で App に PipelineUpdate を送信。
+#[cfg(feature = "tui")]
+struct TuiSubBar {
+    tx: tokio::sync::mpsc::UnboundedSender<PipelineUpdate>,
+    stage: Stage,
+    label: String,
+}
+
+#[cfg(feature = "tui")]
+impl SubBar for TuiSubBar {
+    fn tick(&self, msg: &str) {
+        let _ = self.tx.send(PipelineUpdate::SubTick {
+            stage: self.stage,
+            label: self.label.clone(),
+            msg: msg.to_string(),
+        });
+    }
+    fn done(&self, msg: &str) {
+        let _ = self.tx.send(PipelineUpdate::SubDone {
+            stage: self.stage,
+            label: self.label.clone(),
+            msg: msg.to_string(),
+        });
+    }
+    fn fail(&self, err: &str) {
+        let _ = self.tx.send(PipelineUpdate::SubFail {
+            stage: self.stage,
+            label: self.label.clone(),
+            err: err.to_string(),
+        });
     }
 }
 
