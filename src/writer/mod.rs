@@ -365,27 +365,65 @@ async fn generate_single_image(
             return NvidiaFluxClient::new(http, key).generate_prompt(prompt).await;
         }
     }
-    match cfg.writer.image_provider.as_str() {
-        "pollo" => {
-            let key = cfg.writer.pollo_api_key.as_deref()
-                .ok_or_else(|| anyhow!("POLLO_API_KEY 未設定"))?;
-            PolloClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
-                .with_quality(quality)
-                .generate_with_prompt(prompt).await
+
+    // v0.9.6: 設定された primary provider を最初に試し、失敗時は他の利用可能な provider に
+    //         自動フォールバック。Pollo クレジット切れ等の transient/permanent failure を
+    //         silent loss させない。順番: primary → Gemini → OpenAI → NVIDIA → Pollo (重複排除)。
+    let primary = cfg.writer.image_provider.as_str();
+    let mut tried: Vec<&str> = Vec::with_capacity(4);
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for provider in [primary, "gemini", "openai", "nvidia", "pollo"] {
+        if tried.contains(&provider) {
+            continue;
         }
-        "openai" => {
-            let key = cfg.writer.openai_api_key.as_deref()
-                .ok_or_else(|| anyhow!("OPENAI_API_KEY 未設定"))?;
-            OpenAiImageClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
-                .generate_prompt(prompt).await
+        tried.push(provider);
+
+        let attempt = match provider {
+            "pollo" => match cfg.writer.pollo_api_key.as_deref() {
+                Some(key) => PolloClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
+                    .with_quality(quality)
+                    .generate_with_prompt(prompt)
+                    .await,
+                None => Err(anyhow!("POLLO_API_KEY 未設定")),
+            },
+            "openai" => match cfg.writer.openai_api_key.as_deref() {
+                Some(key) => OpenAiImageClient::new(http, key, &cfg.writer.image_model, &cfg.writer.image_size)
+                    .generate_prompt(prompt)
+                    .await,
+                None => Err(anyhow!("OPENAI_API_KEY 未設定")),
+            },
+            "nvidia" => match cfg.writer.nvidia_api_key.as_deref() {
+                Some(key) => NvidiaFluxClient::new(http, key).generate_prompt(prompt).await,
+                None => Err(anyhow!("NVIDIA_API_KEY 未設定")),
+            },
+            "gemini" => match cfg.writer.gemini_api_key.as_deref() {
+                Some(key) => GeminiImageClient::new(http, key, &cfg.writer.gemini_image_model)
+                    .with_aspect_ratio(&cfg.writer.gemini_aspect_ratio)
+                    .with_image_size(&cfg.writer.gemini_image_size)
+                    .with_thinking_level(&cfg.writer.gemini_thinking_level)
+                    .generate_prompt(prompt)
+                    .await,
+                None => Err(anyhow!("GEMINI_API_KEY 未設定")),
+            },
+            other => Err(anyhow!("unknown image_provider: {}", other)),
+        };
+
+        match attempt {
+            Ok(img) => {
+                if provider != primary {
+                    tracing::info!(provider, primary, quality, "image fallback succeeded");
+                }
+                return Ok(img);
+            }
+            Err(e) => {
+                tracing::warn!(provider, quality, error = %e, "image provider failed, trying next");
+                last_err = Some(e);
+            }
         }
-        "nvidia" => {
-            let key = cfg.writer.nvidia_api_key.as_deref()
-                .ok_or_else(|| anyhow!("NVIDIA_API_KEY 未設定"))?;
-            NvidiaFluxClient::new(http, key).generate_prompt(prompt).await
-        }
-        other => Err(anyhow!("unknown image_provider: {}", other)),
     }
+
+    Err(last_err.unwrap_or_else(|| anyhow!("no image provider available (all keys missing)")))
 }
 
 /// ソース公式 URL から画像を最大 max_count 件並行ダウンロード (M3-C 完全版)。
