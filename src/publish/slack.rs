@@ -23,7 +23,16 @@ pub async fn post_summary(cfg: &Config, summary: &RunSummary) -> Result<()> {
     let blocks = build_blocks(summary);
     let body = json!({ "blocks": blocks });
 
-    let resp = client.post(url).json(&body).send().await?;
+    // MEDIUM fix (codex review 2026-05-09): Slack 通知 retry 抜けを util::send_with_retry で補修。
+    // 旧 `.send().await?` は 429/503/timeout で即失敗 → 最終サマリ通知を落としていた。
+    // 通知リングは「最重要機能」(成果可視化) なので transient error で諦めるべきでない。
+    let resp = crate::util::send_with_retry(
+        || client.post(url).json(&body).send(),
+        3,
+        "slack-summary",
+    )
+    .await
+    .map_err(|e| anyhow!("Slack webhook send: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
@@ -98,7 +107,16 @@ pub async fn post_progress(cfg: &Config, text: &str) {
         return;
     };
     let body = json!({ "text": text });
-    match client.post(url).json(&body).send().await {
+    // MEDIUM fix (codex review 2026-05-09): progress 通知は best-effort なので
+    // retry 数を 2 に絞る (各 stage で連発するため過剰 retry でフェーズ全体を遅延させない)。
+    // 失敗は warn ログ止まりで pipeline 自体は継続する。
+    match crate::util::send_with_retry(
+        || client.post(url).json(&body).send(),
+        2,
+        "slack-progress",
+    )
+    .await
+    {
         Ok(r) if !r.status().is_success() => {
             let st = r.status();
             let t = r.text().await.unwrap_or_default();
