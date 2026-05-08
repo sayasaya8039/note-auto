@@ -272,8 +272,12 @@ fn env_x_api_secret() -> Option<String> { std::env::var("X_API_SECRET").ok() }
 fn env_x_access_token() -> Option<String> { std::env::var("X_ACCESS_TOKEN").ok() }
 fn env_x_access_secret() -> Option<String> { std::env::var("X_ACCESS_SECRET").ok() }
 fn env_slack_webhook() -> Option<String> { std::env::var("SLACK_WEBHOOK_URL").ok() }
-fn default_playwright_script() -> String { "scripts/note-publish.ts".into() }
-fn default_playwright_runtime() -> String { "bun".into() }
+// CRITICAL #2 fix (codex gpt-5.5 review 2026-05-09):
+//   旧 default は scripts/note-publish.ts + bun だったが、v0.9.7 で SingletonLock retry /
+//   8s cooldown / selector fallback / screenshot retry など堅牢化はすべて .mjs 側にしか
+//   実装されていない。config.toml の指定漏れ時に .ts (=堅牢化なし版) に到達する経路を断つ。
+fn default_playwright_script() -> String { "scripts/note-publish.mjs".into() }
+fn default_playwright_runtime() -> String { "node".into() }
 fn default_cookie_dir() -> String { ".cookies".into() }
 fn default_bool_true() -> bool { true }
 fn default_cron() -> String { "0 0 7 * * *".into() } // 毎日 07:00
