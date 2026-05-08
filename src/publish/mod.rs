@@ -6,7 +6,6 @@
 //! 3. Slack へ実行結果通知 (Incoming Webhook)
 
 use anyhow::Result;
-use futures::stream::{self, StreamExt};
 use serde::Serialize;
 
 pub mod note;
@@ -39,12 +38,18 @@ pub struct RunSummary {
     pub duration_secs: u64,
 }
 
-/// 記事リストを公開する (シリアル実行)。
+/// 記事リストを公開する (シリアル実行 + 記事間 cooldown)。
 ///
 /// v0.9.5: `buffered(2)` → `buffered(1)` に変更しシリアル化。
 ///   2 並列だと `.cookies/browser-profile/` への同時アクセスで Chromium SingletonLock
 ///   衝突 → 片方が managed chromium fallback (cookie なし) で起動 → needs_login の
 ///   連鎖を引き起こしていた。シリアル化で衝突を完全排除。
+///
+/// v0.9.7: 各 publish の間に **8 秒 cooldown** を挿入。シリアル実行でも
+///   前 publish のゾンビ msedge.exe が user-data-dir を握ったままになり、
+///   次 spawn で SingletonLock 衝突 → managed chromium fallback (cookie なし)
+///   → needs_login が後半 (TOP=7 で 5 記事目以降) で連発していた。
+///   8 秒待つことで Edge プロセスの自然終了とロック解放を確実にする。
 ///
 /// articles.to_vec() で HRTB lifetime 問題を回避。
 ///
@@ -61,15 +66,14 @@ pub async fn publish_all(
         return Ok(vec![]);
     }
 
-    let owned: Vec<WrittenArticle> = articles.to_vec();
-    let results: Vec<PublishResult> = stream::iter(owned)
-        .map(|a| {
-            let cfg = cfg.clone();
-            async move { publish_one(&cfg, &a).await }
-        })
-        .buffered(1)
-        .collect()
-        .await;
+    let mut results: Vec<PublishResult> = Vec::with_capacity(articles.len());
+    for (idx, a) in articles.iter().enumerate() {
+        // v0.9.7: 2 記事目以降は 8 秒 cooldown を挿入（msedge ロック解放待ち）
+        if idx > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        }
+        results.push(publish_one(cfg, a).await);
+    }
 
     // W7-E: 各記事の publish 結果を sub_bar に反映 (note status / x status 別に done/fail)
     if let Some(p) = progress {
