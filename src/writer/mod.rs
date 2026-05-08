@@ -7,6 +7,8 @@ use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::ai::{
     anthropic::AnthropicClient, gemini::GeminiImageClient, http_client, nvidia::NvidiaFluxClient,
@@ -58,6 +60,14 @@ pub async fn run(
     let owned: Vec<(usize, SelectedTrend)> =
         trends.iter().cloned().enumerate().collect();
 
+    // CRITICAL #1 fix (codex review 2026-05-09):
+    //   旧実装は generate_images が 4 画像を join_all で並列、cfg.writer.concurrency=3 と合わせて
+    //   最大 3 × 4 = 12 並列の image API 発火 → Gemini/OpenAI/Pollo/NVIDIA の 429 直撃。
+    //   process-wide な Arc<Semaphore> を run() で 1 つだけ作成し、generate_images に伝播。
+    //   全記事の全画像生成が 1 個のセマフォを共有するので「全体で N 並列」に正しく制限される。
+    //   default 2、cfg.writer.image_concurrency で調整可能。
+    let img_sem = Arc::new(Semaphore::new(cfg.writer.image_concurrency.max(1)));
+
     // WPW1 (v0.9.2): article ごとに sub_bar を事前作成し、write_one に move で渡す。
     // write_one 内部の各 phase で bar.tick() 駆動、結果に応じて bar.done/fail を呼ぶため、
     // run() 側 results loop では sub_bar 駆動を行わない (write_one が責任を持つ)。
@@ -68,7 +78,8 @@ pub async fn run(
         let label = short_label(&t.item.title, 24, i);
         let bar: Option<Box<dyn crate::display::SubBar>> = progress
             .map(|p| p.sub_bar(crate::display::Stage::Write, &label));
-        async move { (i, write_one(&cfg, &t, &out, i, bar).await) }
+        let sem = img_sem.clone();
+        async move { (i, write_one(&cfg, &t, &out, i, bar, sem).await) }
     });
 
     let results: Vec<(usize, Result<WrittenArticle>)> = stream::iter(tasks)
@@ -105,6 +116,7 @@ async fn write_one(
     out_dir: &Path,
     index: usize,
     bar: Option<Box<dyn crate::display::SubBar>>,
+    img_sem: Arc<Semaphore>,
 ) -> Result<WrittenArticle> {
     let http = http_client();
     let dry_run = cfg.writer.dry_run;
@@ -188,7 +200,7 @@ async fn write_one(
                     .with_context(|| "Opus write failed")
             }
         },
-        generate_images(cfg, &http, &brief_for_images, dry_run),
+        generate_images(cfg, &http, &brief_for_images, dry_run, img_sem.clone()),
     );
     let draft = match draft_res {
         Ok(d) => d,
@@ -302,11 +314,18 @@ fn short_label(s: &str, max: usize, fallback_idx: usize) -> String {
 }
 
 /// 4枚の画像を並列生成。image_prompts が足りない時はテンプレートで補完。
+///
+/// CRITICAL #1 fix: `img_sem` を受け取り、API 呼び出し直前に permit を acquire することで
+/// プロセス全体での画像 API 同時呼び出し数を `cfg.writer.image_concurrency` (default 2) に制限する。
+/// `join_all` 自体は維持するが、内部で permit 待ちが発生するため実効並列度はセマフォで律速される。
+/// run() で 1 個だけ作られた Arc<Semaphore> が全記事の全画像に共有されるため、
+/// 「3 記事 × 4 画像 = 12 同時発火」を構造的に防ぐ。
 async fn generate_images(
     cfg: &Config,
     http: &reqwest::Client,
     brief: &ArticleBrief,
     dry_run: bool,
+    img_sem: Arc<Semaphore>,
 ) -> Vec<Option<ImageAsset>> {
     if dry_run {
         return vec![None; 4];
@@ -316,9 +335,19 @@ async fn generate_images(
         let cfg = cfg.clone();
         let http = http.clone();
         let prompt = p.clone();
+        let sem = img_sem.clone();
         // Hero (i==0) は high 品質、インライン (i>=1) は low 品質
         let quality = if i == 0 { "high" } else { "low" };
         async move {
+            // permit を取得するまで待機。Semaphore close は run() 終端まで起きないので
+            // acquire_owned が Err を返すケースは事実上無く、保険として None にフォールバック。
+            let _permit = match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(idx = i, error = %e, "image semaphore closed, skipping");
+                    return None;
+                }
+            };
             match generate_single_image(&cfg, &http, &prompt, quality).await {
                 Ok(img) => {
                     tracing::info!(idx = i, quality = %quality, "image ready");
