@@ -88,12 +88,21 @@ SNSや note 読者の興味を引きそうなものを {top_n} 件厳選して�
         ]
     });
 
-    let resp = client
-        .post(ENDPOINT)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await?;
+    // HIGH #5 fix (codex review 2026-05-09): retry/backoff 抜けを util::send_with_retry で補修。
+    // 旧 `.send().await?` は 429/503/timeout で即失敗 → konbini source 全滅。
+    let resp = crate::util::send_with_retry(
+        || {
+            client
+                .post(ENDPOINT)
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+        },
+        3,
+        "konbini-grok",
+    )
+    .await
+    .map_err(|e| anyhow!("Grok API (konbini) send: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();

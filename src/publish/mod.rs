@@ -66,6 +66,40 @@ pub async fn publish_all(
         return Ok(vec![]);
     }
 
+    // HIGH #4 fix (codex review 2026-05-09):
+    //   旧実装は daemon::execute_cycle のみ `.note-auto.lock` を取得していたため、
+    //   別ターミナルから `note-auto publish --from drafts/.../articles.json` を直接叩くと
+    //   daemon と同時に Chromium profile (cookie_dir/browser-profile/) を触り、
+    //   SingletonLock 衝突 → managed chromium fallback (cookie なし) → needs_login の
+    //   連鎖を引き起こしていた。
+    //
+    //   publish_all の入口で cookie_dir 単位の `FileLock` を取り、daemon と Command::Publish
+    //   の両方を同じロックで排他化する。dry_run / note_skip 時は note サイドカーが
+    //   そもそも起動しないのでロック不要。
+    let _publish_lock: Option<crate::util::FileLock> =
+        if cfg.publish.dry_run || cfg.publish.note_skip {
+            None
+        } else {
+            let lock_path = std::path::Path::new(&cfg.publish.cookie_dir).join(".publish.lock");
+            match crate::util::FileLock::acquire(&lock_path, true) {
+                Ok(g) => {
+                    tracing::debug!(path = %lock_path.display(), "publish lock acquired");
+                    Some(g)
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to acquire publish lock at {}: {}\n\
+                         別プロセス (daemon / 別 terminal の publish コマンド) が同じ\n\
+                         cookie_dir で稼働中の可能性があります。完了を待つか手動で\n\
+                         {} を削除してください。",
+                        lock_path.display(),
+                        e,
+                        lock_path.display(),
+                    ));
+                }
+            }
+        };
+
     let mut results: Vec<PublishResult> = Vec::with_capacity(articles.len());
     for (idx, a) in articles.iter().enumerate() {
         // v0.9.7: 2 記事目以降は 8 秒 cooldown を挿入（msedge ロック解放待ち）

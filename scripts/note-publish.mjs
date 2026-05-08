@@ -14,7 +14,7 @@
 console.error("[note-publish] script start (node)");
 
 import { chromium } from "playwright";
-import { readFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, unlinkSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
@@ -66,13 +66,29 @@ async function waitForPort(port, timeoutMs = 5_000) {
 /**
  * 残骸の SingletonLock / SingletonCookie / SingletonSocket を best-effort で削除。
  * Fix-B: 前回 Chrome が異常終了するとロックが残り、次回起動が exit code 21 で即死する。
+ *
+ * HIGH #3 fix (codex review 2026-05-09):
+ *   旧実装は無条件削除で、生存中 Chromium がロックを保持しているケースでも
+ *   消してしまう恐れがあった (profile 多重利用 / corruption の温床)。
+ *   `staleAfterMs` 以上経過した stale lock のみ削除し、新鮮な lock は残す。
+ *   呼出元 (launchViaCDP) は exit code 21 retry path で 15s/25s 待機するため、
+ *   default 60s のしきい値で「直前に立ち上がった生存ブラウザ」のみを保護できる。
  */
-function cleanupSingletonLocks(profileDir) {
+function cleanupSingletonLocks(profileDir, staleAfterMs = 60_000) {
+  const now = Date.now();
   for (const lock of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    const p = resolve(profileDir, lock);
     try {
-      unlinkSync(resolve(profileDir, lock));
+      const st = statSync(p);
+      const age = now - st.mtimeMs;
+      if (age >= staleAfterMs) {
+        unlinkSync(p);
+        console.error(`[lock] removed stale ${lock} (age=${(age / 1000).toFixed(1)}s)`);
+      } else {
+        console.error(`[lock] keep fresh ${lock} (age=${(age / 1000).toFixed(1)}s < ${(staleAfterMs / 1000).toFixed(0)}s)`);
+      }
     } catch {
-      // 存在しない / 削除不能は無視
+      // 存在しない / stat 不能は無視
     }
   }
 }
@@ -141,17 +157,35 @@ async function launchViaCDP(executablePath, cookieDir, headless, retryCount = 0)
   }
 
   console.error(`[cdp] port ${port} ready, connecting...`);
-  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-  const ctx = browser.contexts()[0] ?? await browser.newContext();
-
-  // すべての新規ページに webdriver 痕跡を消す init script を注入
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    // @ts-ignore
-    if (!window.chrome) window.chrome = { runtime: {} };
-    Object.defineProperty(navigator, "languages", { get: () => ["ja-JP", "ja", "en-US", "en"] });
-    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-  });
+  // HIGH #3 fix (codex review 2026-05-09):
+  //   旧実装は connectOverCDP / addInitScript の throw 時に child を kill しなかった。
+  //   これらは waitForPort 後に走る = port は live なのに Playwright 側の異常 (CDP
+  //   ハンドシェイク失敗 / API バージョン違い等) で失敗し得る。child を放置すると
+  //   profile を握ったまま残留し、次 spawn で SingletonLock 衝突を再発させる。
+  //   try/catch で確実に kill してから throw する。
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  } catch (e) {
+    try { if (!child.killed) child.kill(); } catch {}
+    throw new Error(`connectOverCDP failed (port=${port}): ${String(e?.message ?? e)}`);
+  }
+  let ctx;
+  try {
+    ctx = browser.contexts()[0] ?? await browser.newContext();
+    // すべての新規ページに webdriver 痕跡を消す init script を注入
+    await ctx.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      // @ts-ignore
+      if (!window.chrome) window.chrome = { runtime: {} };
+      Object.defineProperty(navigator, "languages", { get: () => ["ja-JP", "ja", "en-US", "en"] });
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    });
+  } catch (e) {
+    try { await browser.close(); } catch {}
+    try { if (!child.killed) child.kill(); } catch {}
+    throw new Error(`init script injection failed: ${String(e?.message ?? e)}`);
+  }
 
   console.error(`[cdp] connected. contexts=${browser.contexts().length}`);
   return { ctx, browser, browserChild: child, label: `cdp:${executablePath.split(/[\\/]/).pop()}` };

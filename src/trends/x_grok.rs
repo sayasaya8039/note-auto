@@ -266,13 +266,22 @@ async fn call_chat_fallback(
             {"role": "user", "content": user_prompt}
         ]
     });
-    let resp = client
-        .post(CHAT_ENDPOINT)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("chat fallback send err: {}", err_chain(&e)))?;
+    // HIGH #5 fix (codex review 2026-05-09): chat fallback にも retry/backoff を導入。
+    // この経路は Responses API 全候補失敗後の最終 fallback なので、
+    // 一過性の 429/503/timeout で更に失敗すると x source 全滅 → 多カテゴリ trend 0 件になる。
+    let resp = crate::util::send_with_retry(
+        || {
+            client
+                .post(CHAT_ENDPOINT)
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+        },
+        3,
+        "x-grok-chat-fallback",
+    )
+    .await
+    .map_err(|e| anyhow!("chat fallback send err: {}", err_chain(&e)))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
