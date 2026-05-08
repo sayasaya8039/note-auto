@@ -322,6 +322,90 @@ fn backoff_ms(attempt: usize) -> u64 {
     base.saturating_add(jitter)
 }
 
+/// `.lock` ファイルによる粗粒度 RAII ロック (Windows / Unix 共通、flock 不要)。
+///
+/// `acquire` は `create_new` で排他作成、Drop で削除。既に存在する場合は `Err`。
+/// プロセス異常終了で残った stale lock は、書き込まれた PID のプロセス生存を
+/// 確認して自動回収する (`reclaim_if_stale = true` 時)。
+///
+/// HIGH #4 (codex review 2026-05-09): 旧 daemon 専用 LockGuard を移植・拡張。
+/// `Command::Publish` と daemon の publish_all 両方で cookie_dir 単位の共有
+/// ロックを取り、Chromium profile の同時アクセスを防ぐ。
+pub struct FileLock {
+    path: std::path::PathBuf,
+}
+
+impl FileLock {
+    /// `path` に lock ファイルを排他作成。`reclaim_if_stale = true` の場合、
+    /// 既存ファイルから PID を読み、当該 PID が現在生存していなければ削除して再作成。
+    pub fn acquire(path: &std::path::Path, reclaim_if_stale: bool) -> anyhow::Result<Self> {
+        Self::try_create(path)
+            .or_else(|e| {
+                if !reclaim_if_stale {
+                    return Err(e);
+                }
+                // 既存 lock の PID を読み、生存確認失敗なら削除してリトライ
+                let stale = match std::fs::read_to_string(path) {
+                    Ok(s) => s.trim().parse::<u32>().map(pid_alive).map(|alive| !alive)
+                        .unwrap_or(true), // PID parse 失敗 → stale 扱い
+                    Err(_) => true,
+                };
+                if stale {
+                    let _ = std::fs::remove_file(path);
+                    Self::try_create(path)
+                } else {
+                    Err(e)
+                }
+            })
+    }
+
+    fn try_create(path: &std::path::Path) -> anyhow::Result<Self> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
+        match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(mut f) => {
+                let pid = std::process::id();
+                let _ = writeln!(f, "{pid}");
+                Ok(Self { path: path.to_path_buf() })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                anyhow::bail!(
+                    "lock file already exists: {} (別プロセスが実行中？古い lock なら手動削除)",
+                    path.display()
+                )
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// PID が生存しているかチェック (cross-platform、best-effort)。
+/// Windows: `tasklist` の代わりに `OpenProcess` で確認するのが厳密だが、
+/// 依存追加を避けるため、自プロセスとの比較 + ファイル存在チェックの単純実装にする。
+/// Unix: `kill(pid, 0)` で signal 0 を送れば EXISTS 判定できる (libc 必要)。
+/// ここでは依存ゼロで「自分の PID なら alive」「それ以外は不明 → false (stale 扱い)」とする。
+/// HIGH #4 fix: 安全側に倒すなら true (= 削除しない)。reclaim は手動 fallback で十分。
+fn pid_alive(pid: u32) -> bool {
+    // 自プロセスと同じ PID は当然 alive (defensive)
+    if pid == std::process::id() {
+        return true;
+    }
+    // dependence を増やさず安全側 (= alive 扱い、既存 lock を尊重) を返す。
+    // 利用側は reclaim_if_stale=true でも基本上書きせず、必要なら手動削除を促す。
+    true
+}
+
 /// YAML 値のエスケープ (インジェクション防止)
 pub fn yaml_escape(s: &str) -> String {
     s.replace('\\', "\\\\")

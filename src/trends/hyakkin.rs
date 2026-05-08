@@ -88,12 +88,20 @@ note 読者の生活トピックとして価値が出そうなものを {top_n} 
         ]
     });
 
-    let resp = client
-        .post(ENDPOINT)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await?;
+    // HIGH #5 fix (codex review 2026-05-09): konbini.rs と同様に retry を導入。
+    let resp = crate::util::send_with_retry(
+        || {
+            client
+                .post(ENDPOINT)
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+        },
+        3,
+        "hyakkin-grok",
+    )
+    .await
+    .map_err(|e| anyhow!("Grok API (hyakkin) send: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
