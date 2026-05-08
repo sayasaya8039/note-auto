@@ -137,6 +137,11 @@ pub struct WriterConfig {
     /// 21 記事 × 7 API ≒ 147 並列を防ぐ最重要パラメータ。
     #[serde(default = "default_writer_concurrency")]
     pub concurrency: usize,
+    /// 画像生成 API の同時呼び出し上限（プロセス全体で run() ごとに1つの Semaphore で制御）。
+    /// デフォルト 2 — 記事間並列度 3 と組み合わせて Gemini/OpenAI/Pollo/NVIDIA の 429 を抑える。
+    /// 旧実装は記事内 4 画像 × 記事並列 3 = 12 同時発火していた。
+    #[serde(default = "default_image_concurrency")]
+    pub image_concurrency: usize,
 }
 
 impl Default for WriterConfig {
@@ -161,6 +166,7 @@ impl Default for WriterConfig {
             max_tokens: default_max_tokens(),
             dry_run: false,
             concurrency: default_writer_concurrency(),
+            image_concurrency: default_image_concurrency(),
         }
     }
 }
@@ -314,6 +320,7 @@ fn default_haiku_model() -> String { "claude-haiku-4-5-20251001".into() }
 fn default_grok_model() -> String { "grok-3-latest".into() }
 
 fn default_writer_concurrency() -> usize { 3 }
+fn default_image_concurrency() -> usize { 2 }
 // pollo モデル名 (例: "openai-gpt-image-2-0" / "openai-gpt-image-1-5" / "gpt-4o" / "dall-e-3")
 // OpenAI 直呼びの場合は "gpt-image-1" / "dall-e-3"
 fn default_image_model() -> String { "openai-gpt-image-2-0".into() }
