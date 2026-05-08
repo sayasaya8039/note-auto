@@ -5,8 +5,8 @@
   "description": "Playwright サイドカー for note.com 自動投稿",
   "type": "module",
   "scripts": {
-    "login": "bun scripts/note-publish.ts --login .cookies",
-    "test-publish": "bun scripts/note-publish.ts"
+    "login": "node scripts/note-publish.mjs --login .cookies",
+    "test-publish": "node scripts/note-publish.mjs"
   },
   "dependencies": {
     "playwright": "^1.49.0",
