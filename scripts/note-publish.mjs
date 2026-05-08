@@ -261,6 +261,24 @@ async function waitForSelectorWithRetry(page, selector, stage, cookieDir) {
   }
 }
 
+// v0.9.5: 複数 selector 候補を順試行し、最初にヒットしたものを返す。
+//   note.com UI 変更で 1 つの selector が効かなくなっても fallback で生存する。
+//   全候補失敗時は既存の waitForSelectorWithRetry にフォールバック (screenshot + reload)。
+async function resolveSelector(page, candidates, label, cookieDir, perSelTimeout = 15_000) {
+  for (const sel of candidates) {
+    try {
+      await page.waitForSelector(sel, { state: "visible", timeout: perSelTimeout });
+      console.error(`[selector] ${label} resolved: ${sel}`);
+      return sel;
+    } catch {
+      console.error(`[selector] ${label} not found: ${sel} (try next)`);
+    }
+  }
+  console.error(`[selector] ${label} all candidates failed, falling back to waitForSelectorWithRetry on first candidate`);
+  await waitForSelectorWithRetry(page, candidates[0], label, cookieDir);
+  return candidates[0];
+}
+
 async function loginFlow(cookieDir) {
   mkdirSync(cookieDir, { recursive: true });
   console.error(`[login] cookie_dir=${resolve(cookieDir)}`);
@@ -308,17 +326,28 @@ async function run(input) {
     // 本文先頭の `# タイトル` は note のタイトル欄と重複するため除去
     const mdBody = mdBodyRaw.replace(/^\s*#\s+.+?\n+/, "");
 
-    // タイトル (textarea[placeholder="記事タイトル"])
-    const titleSel = 'textarea[placeholder="記事タイトル"]';
-    // Fix-S: 60s timeout + 失敗時 screenshot + reload 1 retry
-    await waitForSelectorWithRetry(page, titleSel, "title", input.cookie_dir);
+    // タイトル — v0.9.5: note.com UI 変更耐障害化のため複数 selector を順試行
+    const titleSelCandidates = [
+      'textarea[placeholder="記事タイトル"]',     // 既存 (現行 UI)
+      'textarea[placeholder*="タイトル"]',         // placeholder 部分一致
+      'textarea[aria-label*="タイトル"]',          // aria-label
+      'h1[contenteditable="true"]',                // ProseMirror H1 形式 (新 UI 想定)
+      '[data-testid*="title"] textarea',           // testid 派生
+      '[class*="title"] textarea',                 // class 派生
+    ];
+    const titleSel = await resolveSelector(page, titleSelCandidates, "title", input.cookie_dir);
     await page.fill(titleSel, finalTitle);
 
     // 本文 (ProseMirror エディタ)
     // markdown を HTML に変換し、DataTransfer 経由で paste イベントを dispatch する
-    const bodySel = 'div.ProseMirror[contenteditable="true"]';
-    // Fix-S: 60s timeout + 失敗時 screenshot + reload 1 retry
-    await waitForSelectorWithRetry(page, bodySel, "body", input.cookie_dir);
+    // v0.9.5: 同様にフォールバックチェーンで耐障害化
+    const bodySelCandidates = [
+      'div.ProseMirror[contenteditable="true"]',          // 既存
+      '[contenteditable="true"][class*="ProseMirror"]',   // class 部分一致
+      '[role="textbox"][contenteditable="true"]',         // ARIA role
+      'div[contenteditable="true"]',                       // 最広範
+    ];
+    const bodySel = await resolveSelector(page, bodySelCandidates, "body", input.cookie_dir);
     const bodyLocator = page.locator(bodySel).first();
     await bodyLocator.click();
     await page.waitForTimeout(500);

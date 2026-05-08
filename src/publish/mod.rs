@@ -39,9 +39,14 @@ pub struct RunSummary {
     pub duration_secs: u64,
 }
 
-/// 記事リストを並列公開する (並列度 2、Playwright セッション競合を抑制)。
+/// 記事リストを公開する (シリアル実行)。
 ///
-/// articles.to_vec() で HRTB lifetime 問題を回避し、buffered(2) で並列処理。
+/// v0.9.5: `buffered(2)` → `buffered(1)` に変更しシリアル化。
+///   2 並列だと `.cookies/browser-profile/` への同時アクセスで Chromium SingletonLock
+///   衝突 → 片方が managed chromium fallback (cookie なし) で起動 → needs_login の
+///   連鎖を引き起こしていた。シリアル化で衝突を完全排除。
+///
+/// articles.to_vec() で HRTB lifetime 問題を回避。
 ///
 /// L10: `#[tracing::instrument]` で publish stage 経過時間を自動計測。
 /// W7-E (v0.9.1): `progress` を渡すと publish 完了時に sub_bar 経由で進捗を可視化。
@@ -62,7 +67,7 @@ pub async fn publish_all(
             let cfg = cfg.clone();
             async move { publish_one(&cfg, &a).await }
         })
-        .buffered(2)
+        .buffered(1)
         .collect()
         .await;
 

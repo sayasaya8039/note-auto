@@ -76,8 +76,23 @@ impl<'a> PolloClient<'a> {
         struct TaskRef { id: u64, #[allow(dead_code)] status: String }
 
         // AF2: AiClient + client::send_json 経由で M2 retry + status check + parse 統合
-        let submit_resp: SubmitResp = super::client::send_json(self, &submit).await
-            .context("Pollo submit failed")?;
+        // v0.9.5: 失敗時に詳細を warn ログで残して原因切り分けを可能にする
+        //   (認証 401/403 / quota 429 / 5xx / parse error / network 等を区別したい)
+        let submit_resp: SubmitResp = match super::client::send_json(self, &submit).await {
+            Ok(r) => r,
+            Err(e) => {
+                let prompt_head: String = prompt.chars().take(80).collect();
+                tracing::warn!(
+                    error = %e,
+                    error_chain = ?e,
+                    model = %self.model_name,
+                    quality = %self.quality,
+                    prompt_head = %prompt_head,
+                    "pollo submit failed (詳細)"
+                );
+                return Err(e).context("Pollo submit failed");
+            }
+        };
         let task_id = submit_resp.data.id;
         tracing::info!(task_id, model = %self.model_name, quality = %self.quality, "pollo task submitted");
 
