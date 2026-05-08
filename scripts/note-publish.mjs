@@ -121,11 +121,18 @@ async function launchViaCDP(executablePath, cookieDir, headless, retryCount = 0)
   try {
     await Promise.race([waitForPort(port), exitPromise]);
   } catch (e) {
-    // SingletonLock 衝突 → 1 回だけ 5s 待って同 candidate を retry
-    if (/SingletonLock collision/.test(e.message) && retryCount === 0) {
-      console.error(`[cdp] SingletonLock collision detected, waiting 5s and retrying...`);
+    // v0.9.7: SingletonLock 衝突 → 最大 2 回 retry、wait は 15s/25s に拡張。
+    //   v0.9.5 の buffered(1) シリアル化でも、前 publish のゾンビ msedge が
+    //   user-data-dir を握ったままでロック解放が間に合わないケースがあった
+    //   (TOP=7 後半で需要 needs_login が連続発生した実績)。
+    //   wait を伸ばすことで Edge の自然終了を待ち、確実にロックを解放させる。
+    if (/SingletonLock collision/.test(e.message) && retryCount < 2) {
+      const waitMs = retryCount === 0 ? 15_000 : 25_000;
+      console.error(`[cdp] SingletonLock collision detected, waiting ${waitMs / 1000}s and retrying (attempt ${retryCount + 1}/2)...`);
       try { child.kill(); } catch {}
-      await sleep(5_000);
+      await sleep(waitMs);
+      // v0.9.7: lock が残っていれば再度 cleanup
+      cleanupSingletonLocks(profileDir);
       return await launchViaCDP(executablePath, cookieDir, headless, retryCount + 1);
     }
     // それ以外の早期 exit / port timeout → 子プロセス確実に kill
